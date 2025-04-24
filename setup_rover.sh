@@ -348,18 +348,18 @@ if [ "$install_repo" = true ]; then
         echo ""
         cd ~/$WORKSPACE_NAME/src/roverrobotics_ros2/roverrobotics_driver/config > /dev/null
 
-        # Delete "controller_config.yaml" if it exists
-        if [ -f "controller_config.yaml" ]; then
-            rm "controller_config.yaml"
-            echo "Deleted controller_config.yaml"
+        # Delete "ps4_controller_config.yaml" if it exists
+        if [ -f "ps4_controller_config.yaml" ]; then
+            rm "ps4_controller_config.yaml"
+            echo "Deleted ps4_controller_config.yaml"
         fi
 
-        # Rename "controller_config_jp6.yaml" to "controller_config.yaml" if it exists
-        if [ -f "controller_config_jp6.yaml" ]; then
-            mv "controller_config_jp6.yaml" "controller_config.yaml"
-            echo "Renamed controller_config_jp6.yaml to controller_config.yaml"
+        # Rename "ps4_controller_config_jp6.yaml" to "ps4_controller_config.yaml" if it exists
+        if [ -f "ps4_controller_config_jp6.yaml" ]; then
+            mv "ps4_controller_config_jp6.yaml" "ps4_controller_config.yaml"
+            echo "Renamed ps4_controller_config_jp6.yaml to ps4_controller_config.yaml"
         else
-            echo "controller_config_jp6 not found."
+            echo "ps4_controller_config_jp6 not found."
         fi
 
     else
