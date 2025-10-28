@@ -1,17 +1,14 @@
-**🚀 Rover Robotics ROS 2 Installation Scripts
-**
+**🚀 Rover Robotics ROS 2 Installation Scripts**
 Easily set up your Rover Robotics platform with ROS 2 using these install scripts.
 These scripts handle everything — from installing ROS 2 to configuring your robot, udev rules, and system services — so you can get rolling quickly!
 
-**🧠 Before You Begin
-**
+**🧠 Before You Begin**
 ✅ Operating System: Ubuntu 22.04 (Jammy) or Ubuntu 24.04 (Noble)
 ✅ ROS 2 Versions Supported: Humble / Jazzy
 ✅ Internet Connection: Required for installation
 ✅ Recommended Hardware: Jetson AGX Orin, Jetson Orin Nano, NUCs, Raspberry PIs or similar Linux computer
 
-**⚙️ Step 1 – Install ROS 2 (if not already installed)
-**
+**⚙️ Step 1 – Install ROS 2 (if not already installed)**
 If ROS 2 isn’t installed yet, you can use our simple setup script:
 
 git clone https://github.com/RoverRobotics/rover_install_scripts_ros2
@@ -24,8 +21,7 @@ sudo chmod +x ros2_installation.sh
 
 Once complete, ROS 2 will be ready to use on your system!
 
-**🤖 Step 2 – Set Up Your Rover
-**
+**🤖 Step 2 – Set Up Your Rover**
 Next, run the main setup script to configure your Rover robot:
 
 cd rover_install_scripts_ros2
@@ -43,23 +39,19 @@ Optionally create a system service (roverrobotics.service) that automatically st
 
 If you prefer to start the driver manually, simply decline the service creation when prompted.
 
-**🔌 Connecting Your Rover
-**
+**🔌 Connecting Your Rover**
 Most of the M-Series rovers (mini, miti, max, and mega) use a CAN-to-USB converter, which this script automatically configures.
 
-**✅ All Set!
-**
+**✅ All Set!**
 Once installation finishes successfully, your Rover is ready to run!
 Power up your system, and if you enabled the service, the Rover driver will start automatically on boot.
 
 You can now use your ROS 2 workspace to teleoperate, navigate, or develop custom applications for your Rover Robotics platform.
 
-**🧩 Need Help?
-**
+**🧩 Need Help?**
 For troubleshooting or questions, please check the [Rover Robotics documentation]([url](www.roverrobotics.com)) on our website or reach out to the community on the [Rover Robotics GitHub]([url](https://github.com/RoverRobotics)) Discussions.
 
-**💡 Pro Tip:
-**
+**💡 Pro Tip:**
 If you modify configuration files or update the driver, you can restart the service without rebooting using:
 
 sudo systemctl restart roverrobotics.service
