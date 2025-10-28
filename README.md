@@ -1,34 +1,65 @@
-# rover_install_scripts_ros2
-Install Scripts for Rover Robots
+**🚀 Rover Robotics ROS 2 Installation Scripts
+**
+Easily set up your Rover Robotics platform with ROS 2 using these install scripts.
+These scripts handle everything — from installing ROS 2 to configuring your robot, udev rules, and system services — so you can get rolling quickly!
 
-**REQUIRES UBUNTU 22.04 & ROS2 HUMBLE**
+**🧠 Before You Begin
+**
+✅ Operating System: Ubuntu 22.04 (Jammy) or Ubuntu 24.04 (Noble)
+✅ ROS 2 Versions Supported: Humble / Jazzy
+✅ Internet Connection: Required for installation
+✅ Recommended Hardware: Jetson AGX Orin, Jetson Orin Nano, NUCs, Raspberry PIs or similar Linux computer
 
-```
+**⚙️ Step 1 – Install ROS 2 (if not already installed)
+**
+If ROS 2 isn’t installed yet, you can use our simple setup script:
+
 git clone https://github.com/RoverRobotics/rover_install_scripts_ros2
+cd rover_install_scripts_ros2
+sudo chmod +x ros2_installation.sh
+./ros2_installation.sh
+
+
+👉 The script will ask which ROS 2 distribution you want (Humble or Jazzy) and whether you want the Desktop or Base installation.
+
+Once complete, ROS 2 will be ready to use on your system!
+
+**🤖 Step 2 – Set Up Your Rover
+**
+Next, run the main setup script to configure your Rover robot:
 
 cd rover_install_scripts_ros2
-
-sudo chmod 777 setup_rover.sh
-
+sudo chmod +x setup_rover.sh
 ./setup_rover.sh
 
-```
 
+The installer will guide you through a few setup options:
 
-This install script will ask you which robot you wish to install and additionally asks if you want to create a roverrobotics.service, setup udev rules, etc. The service automatically starts on computer boot up and runs our robot driver. If you do not wish for it to automatically start, please decline the service creation. For the mini or miti, most have a can-to-usb converter that the script will set up the drivers for. If you wish, you can also plug a micro usb into the vesc port that controls the rear right hub motor. You must also change the config file for the mini or miti to use ``comm_type: serial`` and set the corresponding ``/dev/tty*`` port.
+Select your Rover model (Mini, Miti, Pro, Zero, Max, or Mega)
 
-  
+Set up udev rules for automatic device/sensor detection
 
-Once the install is finished you are good to go!
+Optionally create a system service (roverrobotics.service) that automatically starts your Rover driver when the computer boots up
 
-# ros2 installation script
-Ubuntu 22.04 and ROS2 Humble must be installed before installing any Rover Robotics scripts. You can do this manually or you can use the included ROS2 setup file included with this repo.
+If you prefer to start the driver manually, simply decline the service creation when prompted.
 
-```
-cd rover_install_scripts_ros2
+**🔌 Connecting Your Rover
+**
+Most of the M-Series rovers (mini, miti, max, and mega) use a CAN-to-USB converter, which this script automatically configures.
 
-sudo chmod 777 ros2-humble-main.sh
+**✅ All Set!
+**
+Once installation finishes successfully, your Rover is ready to run!
+Power up your system, and if you enabled the service, the Rover driver will start automatically on boot.
 
-./ros2-humble-main.sh
+You can now use your ROS 2 workspace to teleoperate, navigate, or develop custom applications for your Rover Robotics platform.
 
-```
+**🧩 Need Help?
+**
+For troubleshooting or questions, please check the [Rover Robotics documentation]([url](www.roverrobotics.com)) on our website or reach out to the community on the [Rover Robotics GitHub]([url](https://github.com/RoverRobotics)) Discussions.
+
+**💡 Pro Tip:
+**
+If you modify configuration files or update the driver, you can restart the service without rebooting using:
+
+sudo systemctl restart roverrobotics.service
