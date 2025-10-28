@@ -53,7 +53,7 @@ If you prefer to start the driver manually, simply **decline** the service creat
 
 ## 🔌 Connecting Your Rover
 
-Most M-Seried rovers (mini, miti, max, and mega) use a **CAN-to-USB converter**, which this script automatically configures.
+Most of the M-Series Rovers (mini, miti, max, and mega) use a **CAN-to-USB converter**, which this script automatically configures.
 
 ---
 
