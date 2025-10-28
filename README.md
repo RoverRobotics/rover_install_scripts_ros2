@@ -10,7 +10,7 @@ These scripts handle everything, from installing ROS 2 to configuring your robot
 ✅ **Operating System:** Ubuntu 22.04 (Jammy) or Ubuntu 24.04 (Noble)  
 ✅ **ROS 2 Versions Supported:** Humble / Jazzy  
 ✅ **Internet Connection:** Required for installation  
-✅ **Recommended Hardware:** Jetson AGX Orin, Jetson Orin Nano, NUCs, Raspberry PIs, or similar Linux computer  
+✅ **Recommended Hardware:** Jetson AGX Orin, Jetson Orin Nano, NUCs, Raspberry PIs, or any computer which supports Linux  
 
 ---
 
