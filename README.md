@@ -1,7 +1,7 @@
 # 🚀 Rover Robotics ROS 2 Installation Scripts
 
 Easily set up your Rover Robotics platform with ROS 2 using these install scripts.  
-These scripts handle everything — from installing ROS 2 to configuring your robot, udev rules, and system services — so you can get rolling quickly!
+These scripts handle everything, from installing ROS 2 to configuring your robot, udev rules, and system services, so you can get rolling quickly!
 
 ---
 
@@ -10,7 +10,7 @@ These scripts handle everything — from installing ROS 2 to configuring your ro
 ✅ **Operating System:** Ubuntu 22.04 (Jammy) or Ubuntu 24.04 (Noble)  
 ✅ **ROS 2 Versions Supported:** Humble / Jazzy  
 ✅ **Internet Connection:** Required for installation  
-✅ **Recommended Hardware:** Jetson AGX Orin, Jetson Orin Nano, NUC, or similar Linux computer  
+✅ **Recommended Hardware:** Jetson AGX Orin, Jetson Orin Nano, NUCs, Raspberry PIs, or similar Linux computer  
 
 ---
 
@@ -43,7 +43,7 @@ sudo chmod +x setup_rover.sh
 
 The installer will guide you through a few setup options:
 
-- **Select your Rover model** (Mini, Miti, Pro, Zero 2, etc.)  
+- **Select your Rover model** (Mini, Miti, Pro, Zero, Max, or Mega)  
 - **Set up udev rules** for automatic device detection  
 - **Optionally create a system service** (`roverrobotics.service`) that automatically starts your Rover driver when the computer boots up
 
@@ -53,15 +53,7 @@ If you prefer to start the driver manually, simply **decline** the service creat
 
 ## 🔌 Connecting Your Rover
 
-Most Mini and Miti rovers use a **CAN-to-USB converter**, which this script automatically configures.
-
-Alternatively, you can connect a **micro-USB cable** to the **VESC port** that controls the rear-right hub motor.  
-If you do this, you’ll need to edit your configuration file:
-
-```yaml
-comm_type: serial
-serial_port: /dev/ttyUSB0   # or the correct /dev/tty* port for your setup
-```
+Most M-Seried rovers (mini, miti, max, and mega) use a **CAN-to-USB converter**, which this script automatically configures.
 
 ---
 
