@@ -69,7 +69,7 @@ You can now use your ROS 2 workspace to teleoperate, navigate, or develop custom
 ## 🧩 Need Help?
 
 For troubleshooting or questions, please check the [Rover Robotics documentation](https://roverrobotics.com) or reach out to the community on the [Rover Robotics GitHub Discussions](https://github.com/RoverRobotics).
-[📄 CAN is not working on Nvidia Devices (PDF)](docs/Nvidia_Kernel_Mod _for_jetpack_6plus.pdf)
+[📄 CAN is not working on Nvidia Devices (PDF)](docs/Nvidia_Kernel_Mod%20_for_jetpack_6plus.pdf)
 
 ---
 
