@@ -86,7 +86,7 @@ create_startup_script() {
     local robot_type=$1
     cat << EOF2 | sudo tee /usr/sbin/roverrobotics
 #!/bin/bash
-source ~/rover_workspace/install/setup.sh
+source ~/rover_workspace/install/setup.bash
 ros2 launch roverrobotics_driver ${robot_type}_teleop.launch.py
 PID=\$!
 wait "\$PID"
@@ -172,33 +172,39 @@ clear
 
 # Prompt the user for device type
 while true; do
-    printf "Enter the robot type [(1) miti_65, (2) miti, (3) mini, (4) zero, (5) pro, (6) max]: "
+    printf "Enter the robot type [(1) mini_2wd, (2) mini, (3) miti_65, (4) miti, (5) zero, (6) pro, (7) max, (8) mega]: "
     read device_type
 
     case "$device_type" in
         "1")
-            device_type="miti_65"
+            device_type="mini_2wd"
             ;;
         "2")
-            device_type="miti"
-            ;;
-        "3")
             device_type="mini"
             ;;
+        "3")
+            device_type="miti_65"
+            ;;
         "4")
-            device_type="zero"
+            device_type="miti"
             ;;
         "5")
-            device_type="pro"
+            device_type="zero"
             ;;
         "6")
+            device_type="pro"
+            ;;
+        "7")
             device_type="max"
+            ;;
+        "8")
+            device_type="mega"
             ;;
     esac
 
 
     # Check if the entered device type is valid
-    if [ "$device_type" != "miti_65" ] && [ "$device_type" != "miti" ] && [ "$device_type" != "mini" ] && [ "$device_type" != "zero" ] && [ "$device_type" != "pro" ] && [ "$device_type" != "max" ]; then
+    if [ "$device_type" != "miti_65" ] && [ "$device_type" != "miti" ] && [ "$device_type" != "mini" ] && [ "$device_type" != "zero" ] && [ "$device_type" != "pro" ] && [ "$device_type" != "max" ] && [ "$device_type" != "mini_2wd" ] && [ "$device_type" != "mega" ]; then
         print_red "Invalid robot type."
     else
         break
@@ -296,7 +302,7 @@ if [ "$install_s2" = true ]; then
     install_total=$((install_total+1))
 fi
 
-if [ "$device_type" = "miti_65" ] || [ "$device_type" = "miti" ] || [ "$device_type" = "mini" ] || [ "$device_type" = "max" ]; then
+if [ "$device_type" = "miti_65" ] || [ "$device_type" = "miti" ] || [ "$device_type" = "mini" ] || [ "$device_type" = "max" ] || [ "$device_type" = "mega" ]; then
     if [ ! -f /etc/systemd/system/can.service ]; then
         install_can=true
     fi
@@ -363,7 +369,7 @@ if [ "$install_repo" = true ]; then
         fi
 
     else
-        print_italic "You selected Intel."
+        print_italic "You selected non-Jetson (e.g., Intel/AMD)."
     fi
     
     if [ "$install_imu" = true ]; then
@@ -388,7 +394,7 @@ if [ "$install_repo" = true ]; then
         echo ""
         print_italic "Cloning RPLIDAR_S2 packages into /home/${WORKSPACE_NAME}/src"
         echo ""
-        git clone $RPLIDAR_REPO -b ros2> /dev/null
+        git clone -b ros2 $RPLIDAR_REPO > /dev/null
         if [ $? -ne 0 ]; then
             print_red "Failed to clone RPLIDAR_S2 packages"
         else
@@ -399,7 +405,7 @@ if [ "$install_repo" = true ]; then
     echo ""
     print_italic "Building Rover Robotics ROS2 packages"
     cd ~/$WORKSPACE_NAME > /dev/null
-    source /opt/ros/$ROS_DISTRO/setup.sh > /dev/null
+    source /opt/ros/$ROS_DISTRO/setup.bash > /dev/null
     colcon build
     if [ $? -ne 0 ]; then
         print_red "Failed to build Rover Robotics ROS2 packages"
