@@ -1,0 +1,13 @@
+# Install: sudo cp 99-can-usb.rules /etc/udev/rules.d/99-can-usb.rules && sudo udevadm control --reload-rules
+# Then unplug/replug the USB-CAN adapter (or reboot) to apply the rename.
+#
+# Renames the gs_usb (InnoMaker USB2CAN V3.3, VID 1d50 / PID 606f) CAN interface
+# to the stable name "can_usb" so enablecan does not depend on canX probe order.
+#
+# Design notes:
+#  - Filename 99-* runs AFTER /usr/lib/udev/rules.d/80-net-setup-link.rules; matters
+#    if matching on ENV{ID_NET_DRIVER} (set by that builtin). ATTRS-based matching
+#    used here reads sysfs directly and is order-independent.
+#  - NAME= does not work for socketcan netdevs (net_setup_link builtin ignores them),
+#    so we rename via `ip link set` in RUN+=.
+SUBSYSTEM=="net", KERNEL=="can*", ACTION=="add", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", RUN+="/bin/ip link set %k name can_usb"
