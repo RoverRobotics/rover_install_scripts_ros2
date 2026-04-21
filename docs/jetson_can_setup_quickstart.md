@@ -93,7 +93,28 @@ Watch out for:
   means no FD.
 - The wait loop is needed because udev-driven rename can race with service start.
 
-## 6. Enable service
+## 6. Install and enable service
+
+Write `/etc/systemd/system/can.service`:
+
+```ini
+[Unit]
+Description=Bring up CAN interface
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/enablecan
+RemainAfterExit=true
+TimeoutStartSec=45
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then:
 
 ```bash
 sudo systemctl daemon-reload
@@ -102,7 +123,10 @@ systemctl status can.service --no-pager
 ip -br link show can_usb    # expect UP,LOWER_UP,ECHO
 ```
 
-Stock `can.service` unit from L4T is fine as-is (`Type=oneshot`, `After=network.target`).
+`Type=oneshot` + `RemainAfterExit=true` is intentional — the script exits after
+bringing the link up; we want the service to stay "active" afterward. `Restart=on-failure`
+covers the case where the USB adapter enumerates late and enablecan's wait loop times
+out on one attempt.
 
 ## 7. ROS config
 

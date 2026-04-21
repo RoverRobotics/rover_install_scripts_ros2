@@ -366,10 +366,51 @@ What this script does, in plain English:
 
 ---
 
-## Step 8 — Enable the startup service
+## Step 8 — Install and enable the startup service
 
-The service that runs `enablecan` at boot already exists on the Jetson — we just need
-to turn it on:
+A "service" in Linux is a program that runs automatically in the background. We need
+to tell the system: "at every boot, run the `enablecan` script we just wrote in
+Step 7". We do this by creating a service file.
+
+Open a text editor to create the service file:
+
+```bash
+sudo nano /etc/systemd/system/can.service
+```
+
+**Delete anything that is already there** (if the file existed) and paste in exactly
+this:
+
+```ini
+[Unit]
+Description=Bring up CAN interface
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/enablecan
+RemainAfterExit=true
+TimeoutStartSec=45
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save and exit: `Ctrl + O`, `Enter`, `Ctrl + X`.
+
+What each part means, briefly:
+- `ExecStart=/usr/sbin/enablecan` — run the script we made in Step 7.
+- `Type=oneshot` + `RemainAfterExit=true` — the script runs once at boot, then exits;
+  the system considers the service "active" after it succeeds.
+- `After=network.target` — wait until basic networking is ready before running.
+- `Restart=on-failure` — if the script fails (for example, the USB adapter isn't
+  detected yet), systemd will try again.
+- `WantedBy=multi-user.target` — run this on every normal boot.
+
+Now tell systemd we added a new service, then enable it (so it runs at boot) and
+start it right now:
 
 ```bash
 sudo systemctl daemon-reload
