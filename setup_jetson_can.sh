@@ -2,9 +2,9 @@
 #########################################################################
 # Script Name  : Jetson USB-CAN Setup                                   #
 # Description  : Builds gs_usb kernel module, installs udev rule for    #
-#                stable naming (can_usb), writes /usr/sbin/enablecan    #
+#                stable naming (rovercan), writes /usr/sbin/enablecan   #
 #                and /etc/systemd/system/can.service, enables the       #
-#                service so can_usb comes up at every boot.             #
+#                service so rovercan comes up at every boot.            #
 # Target       : Jetson L4T R36.x, kernel 5.15.x-tegra or 6.8.x-tegra   #
 # Adapter      : gs_usb family (VID 1d50 / PID 606f), classic CAN only  #
 #                (candleLight / CANable / InnoMaker USB2CAN V3.3 etc.)  #
@@ -21,12 +21,12 @@ set -euo pipefail
 
 BUILD_DIR="$HOME/gs_usb_build"
 BITRATE=500000
-IFACE_NAME="can_usb"
+IFACE_NAME="rovercan"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UDEV_RULE_DEST="/etc/udev/rules.d/99-can-usb.rules"
 
 # Look for the repo-sourced udev rule in a few plausible locations.
-# If none are found, the script falls back to writing the rule inline — so
+# If none are found, the script falls back to writing the rule inline - so
 # you can run this on a fresh Jetson with only the script itself present.
 UDEV_RULE_SRC=""
 for candidate in \
@@ -111,11 +111,11 @@ SUDO_KEEPALIVE_PID=$!
 trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null || true' EXIT
 
 #########################################################################
-#            STEP 1 — BUILD AND INSTALL gs_usb KERNEL MODULE            #
+#            STEP 1 - BUILD AND INSTALL gs_usb KERNEL MODULE            #
 #########################################################################
 
 if [[ $SKIP_BUILD -eq 0 ]]; then
-  info "Step 1/5 — Build gs_usb.ko"
+  info "Step 1/5 - Build gs_usb.ko"
 
   mkdir -p "$BUILD_DIR"
   cd "$BUILD_DIR"
@@ -128,7 +128,7 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
     ok "gs_usb.c already present; not re-downloading"
   fi
 
-  # Write the Makefile (recipe lines must use tabs — printf preserves \t literals)
+  # Write the Makefile (recipe lines must use tabs - printf preserves \t literals)
   cat > Makefile <<'EOF'
 obj-m := gs_usb.o
 KDIR := /lib/modules/$(shell uname -r)/build
@@ -162,7 +162,7 @@ EOF
   sudo depmod -a
   ok "Module installed"
 else
-  info "Step 1/5 — skipping build (driver in-tree)"
+  info "Step 1/5 - skipping build (driver in-tree)"
 fi
 
 info "Loading gs_usb module"
@@ -174,20 +174,20 @@ else
 fi
 
 #########################################################################
-#                    STEP 2 — INSTALL udev RULE                         #
+#                    STEP 2 - INSTALL udev RULE                         #
 #########################################################################
 
-info "Step 2/5 — Install udev rule for stable name $IFACE_NAME"
+info "Step 2/5 - Install udev rule for stable name $IFACE_NAME"
 
 if [[ -n "$UDEV_RULE_SRC" ]]; then
   sudo cp "$UDEV_RULE_SRC" "$UDEV_RULE_DEST"
 else
   sudo tee "$UDEV_RULE_DEST" > /dev/null <<'EOF'
-# Renames the gs_usb CAN adapter (VID 1d50 / PID 606f — candleLight family) to
-# stable name can_usb so enablecan does not depend on canX probe order.
+# Renames the gs_usb CAN adapter (VID 1d50 / PID 606f - candleLight family) to
+# stable name rovercan so enablecan does not depend on canX probe order.
 # NAME= does not work for socketcan (net_setup_link ignores it); RUN+= with
 # `ip link set` is used instead. Filename 99-* runs after 80-net-setup-link.rules.
-SUBSYSTEM=="net", KERNEL=="can*", ACTION=="add", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", RUN+="/bin/ip link set %k name can_usb"
+SUBSYSTEM=="net", ACTION=="add", ATTRS{idVendor}=="1d50", ATTRS{idProduct}=="606f", NAME="rovercan"
 EOF
 fi
 sudo chmod 644 "$UDEV_RULE_DEST"
@@ -220,10 +220,10 @@ else
 fi
 
 #########################################################################
-#               STEP 3 — INSTALL /usr/sbin/enablecan                    #
+#               STEP 3 - INSTALL /usr/sbin/enablecan                    #
 #########################################################################
 
-info "Step 3/5 — Install /usr/sbin/enablecan"
+info "Step 3/5 - Install /usr/sbin/enablecan"
 
 sudo tee /usr/sbin/enablecan > /dev/null <<EOF
 #!/bin/bash
@@ -245,10 +245,10 @@ sudo chmod +x /usr/sbin/enablecan
 ok "enablecan installed (bitrate=$BITRATE, iface=$IFACE_NAME)"
 
 #########################################################################
-#          STEP 4 — INSTALL /etc/systemd/system/can.service             #
+#          STEP 4 - INSTALL /etc/systemd/system/can.service             #
 #########################################################################
 
-info "Step 4/5 — Install can.service unit"
+info "Step 4/5 - Install can.service unit"
 
 sudo tee /etc/systemd/system/can.service > /dev/null <<'EOF'
 [Unit]
@@ -269,14 +269,14 @@ EOF
 ok "can.service installed"
 
 #########################################################################
-#                STEP 5 — RELOAD, ENABLE, AND START                     #
+#                STEP 5 - RELOAD, ENABLE, AND START                     #
 #########################################################################
 
-info "Step 5/5 — Enable and start can.service"
+info "Step 5/5 - Enable and start can.service"
 
 sudo systemctl daemon-reload
 sudo systemctl enable can.service
-sudo systemctl restart can.service || warn "can.service did not start cleanly — check 'journalctl -u can.service'"
+sudo systemctl restart can.service || warn "can.service did not start cleanly - check 'journalctl -u can.service'"
 
 sleep 1
 if systemctl is-active --quiet can.service; then

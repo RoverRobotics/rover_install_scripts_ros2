@@ -79,6 +79,27 @@ if [ "$confirm_uninstall" = true ]; then
         fi
     fi
 
+    if [ -f /etc/systemd/system/rover-realsense.service ]; then
+        sudo systemctl stop rover-realsense.service
+        sudo systemctl disable rover-realsense.service
+        sudo rm -f /etc/systemd/system/rover-realsense.service \
+                   /usr/local/sbin/reset_realsense_usb.sh \
+                   /etc/sudoers.d/rover-realsense
+        sudo systemctl daemon-reload
+        print_green "Successfully removed rover-realsense.service and its reset helper"
+    fi
+
+    if [ -f /etc/systemd/system/can-watchdog.timer ]; then
+        sudo systemctl stop can-watchdog.timer
+        sudo systemctl disable can-watchdog.timer
+        sudo rm -f /etc/systemd/system/can-watchdog.timer \
+                   /etc/systemd/system/can-watchdog.service \
+                   /usr/sbin/can-watchdog \
+                   /usr/sbin/can-selftest
+        sudo systemctl daemon-reload
+        print_green "Successfully removed can-watchdog timer, service and script"
+    fi
+
     if [ -f /etc/systemd/system/can.service ]; then
         sudo systemctl stop can.service 
         sudo systemctl disable can.service
@@ -91,13 +112,28 @@ if [ "$confirm_uninstall" = true ]; then
         fi
     fi
 
-    if [ -f /etc/udev/rules.d/55-roverrobotics.rules ]; then
-        sudo rm /etc/udev/rules.d/55-roverrobotics.rules
+    if [ -f /etc/modules-load.d/gs_usb.conf ]; then
+        sudo rm /etc/modules-load.d/gs_usb.conf
         if [ $? -ne 0 ]; then
-            print_red "Unable to remove /etc/udev/rules.d/55-roverrobotics.rules"
+            print_red "Unable to remove /etc/modules-load.d/gs_usb.conf"
         else
-            print_green "Successfully removed /etc/udev/rules.d/55-roverrobotics.rules"
+            print_green "Successfully removed /etc/modules-load.d/gs_usb.conf"
         fi
+    fi
+
+    for rule in 55-roverrobotics.rules 99-can-usb.rules; do
+        if [ -f "/etc/udev/rules.d/$rule" ]; then
+            sudo rm "/etc/udev/rules.d/$rule"
+            if [ $? -ne 0 ]; then
+                print_red "Unable to remove /etc/udev/rules.d/$rule"
+            else
+                print_green "Successfully removed /etc/udev/rules.d/$rule"
+            fi
+            reload_udev=true
+        fi
+    done
+
+    if [ "${reload_udev:-false}" = true ]; then
         sudo udevadm control --reload-rules > /dev/null
         if [ $? -ne 0 ]; then
             print_red "Failed to reload udev rules"
@@ -111,7 +147,14 @@ if [ "$confirm_uninstall" = true ]; then
             print_green "Triggered udev rules. This works most of the time but you may need to restart."
         fi
     fi
-    grep -F "source ~/$WORKSPACE_NAME/install/setup.bash" ~/.bashrc &&
-    sed -i "\|source ~/$WORKSPACE_NAME/install/setup.bash|d" ~/.bashrc > /dev/null
+
+    # absolute path now, ~ path in older versions
+    for line in "source ~/$WORKSPACE_NAME/install/setup.bash" \
+                "source $HOME/$WORKSPACE_NAME/install/setup.bash"; do
+        if grep -qF "$line" ~/.bashrc; then
+            sed -i "\|$line|d" ~/.bashrc
+            print_green "Removed from ~/.bashrc: $line"
+        fi
+    done
 fi
 
