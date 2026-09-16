@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-i amset -uo pipefail
+set -uo pipefail
 
 #########################################################################
 # Script Name   : ROS 2 Installer (Humble / Jazzy)                      #
