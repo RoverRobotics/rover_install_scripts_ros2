@@ -903,6 +903,10 @@ ExecStart=/bin/bash /usr/sbin/roverrobotics
 # always, not on-failure: a clean exit has still stopped driving the robot
 Restart=always
 RestartSec=5
+# SIGINT to ros2 launch only, so it stops the driver in order and the driver brakes the motors on exit
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target

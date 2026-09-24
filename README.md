@@ -332,6 +332,8 @@ journalctl -u roverrobotics.service -f
 | Controller does nothing | Teleop launch pointed at the other pad | Re-run with `-g ps4` or `-g ps5` |
 | Odometry distance is consistently off | Wrong MAX wheel size | Re-run with `-w 13` or `-w 15` |
 | Driver dies at boot, works by hand | Driver started before the CAN bus | `journalctl -u roverrobotics.service`; the unit is ordered `After=can.service` and retries every 5 s |
+| Wheels keep turning for about a second after the service stops | Unit installed by an older `setup_rover.sh`, without the graceful-stop settings | Re-run `./setup_rover.sh --with-service`; the unit now sets `KillMode=mixed`, `KillSignal=SIGINT`, `TimeoutStopSec=15`, so the driver can brake the motors as it exits |
+| Wheels coast for about a second after the driver crashes | A hard crash or `kill -9` cannot send the brake; the VESCs hold the last command until their own timeout, then release | In VESC Tool, set a *Timeout Brake Current* on each VESC so it brakes instead of coasting when commands stop |
 | `UnicodeDecodeError` from colcon or rosdep | Non-UTF-8 locale | Re-run `./ros2_installation.sh`, which configures the locale |
 | `apt update` signature error | Stale ROS keyring | `./ros2_installation.sh --refresh-keys` |
 | udev `/dev` symlinks missing | `setserial` not installed | Re-run `./setup_rover.sh`; it is in the package list |
