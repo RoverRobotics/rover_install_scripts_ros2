@@ -1563,11 +1563,14 @@ EOF5
     # An adapter knocked loose mid-mission would go unnoticed; poll instead.
     cat << EOF6 | sudo tee /usr/sbin/can-watchdog
 #!/bin/bash
-# Run from can-watchdog.timer every 30s.
+# Run from can-watchdog.timer every 10s.
 IFACE=$CAN_IFACE
 
 state=\$(ip -brief link show "\$IFACE" 2>/dev/null | awk '{print \$2}')
-[ "\$state" = "UP" ] && exit 0
+# a bus-off interface still reports UP, and gs_usb cannot restart itself from it (no restart-ms)
+cstate=\$(ip -details link show "\$IFACE" 2>/dev/null | grep -o 'can state [A-Z-]*' | awk '{print \$3}')
+[ "\$state" = "UP" ] && [ "\$cstate" != "BUS-OFF" ] && exit 0
+[ "\$cstate" = "BUS-OFF" ] && state="UP but BUS-OFF"
 
 # say whether the adapter is even plugged in
 if lsusb 2>/dev/null | grep -qi "$CAN_VID:$CAN_PID"; then
@@ -1601,7 +1604,7 @@ Description=Periodically verify the CAN link is up
 [Timer]
 # let can.service try first at boot
 OnBootSec=60
-OnUnitActiveSec=30
+OnUnitActiveSec=10
 AccuracySec=5
 Unit=can-watchdog.service
 

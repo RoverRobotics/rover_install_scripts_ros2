@@ -161,7 +161,7 @@ and watchdogs, and nothing it does not.
 | Item | Default | What it sets up |
 |---|---|---|
 | **Start the driver at boot** | off | `roverrobotics.service`, which launches the driver at boot, restarts it if it exits, and stops it gracefully so it brakes the motors |
-| **USB-CAN adapter** (CAN robots only) | on | `rovercan` udev rule, `can.service`, `can-watchdog` (restarts CAN if the link drops) and `can-selftest`; see [CAN interface naming](#can-interface-naming) |
+| **USB-CAN adapter** (CAN robots only) | on | `rovercan` udev rule, `can.service`, `can-watchdog` (restarts CAN if the link drops or the bus goes bus-off) and `can-selftest`; see [CAN interface naming](#can-interface-naming) |
 | **BNO055 IMU** | off | the IMU driver. With the driver starting at boot, also a serial flush before each start (`reset_bno055_usb.sh`), so a desynced IMU port cannot keep the driver in a restart loop |
 | **Intel RealSense** | off | the librealsense SDK and ROS wrapper; see below |
 | **Start the camera at boot** | off | `rover-realsense.service` with a boot delay and a USB reset, and `realsense-watchdog`, which restarts the camera if frames stop. Selects RealSense too |
@@ -348,7 +348,7 @@ which mode it settled on.
 | `/etc/modules-load.d/gs_usb.conf` | Loads `gs_usb` at boot (Jetson only) | both |
 | `/usr/sbin/enablecan` | Resets the adapter and brings the CAN link up | both |
 | `/etc/systemd/system/can.service` | Runs `enablecan` at boot | both |
-| `/usr/sbin/can-watchdog` + `.service` + `.timer` | Restarts `can.service` if the link drops | `setup_rover.sh` |
+| `/usr/sbin/can-watchdog` + `.service` + `.timer` | Restarts `can.service` if the link drops or goes bus-off | `setup_rover.sh` |
 | `/usr/sbin/can-selftest` | Says whether a silent bus is the adapter or the rover | `setup_rover.sh` |
 | `/usr/local/sbin/reset_realsense_usb.sh` | Power-cycles the camera over USB before each start | `setup_rover.sh` (RealSense service) |
 | `/etc/sudoers.d/rover-realsense` | NOPASSWD for that one reset script | `setup_rover.sh` (RealSense service) |
@@ -429,7 +429,7 @@ journalctl -u roverrobotics.service -f
 | `rovercan` does not exist, x86 or Pi | Module missing from the kernel | `sudo apt-get install linux-modules-extra-$(uname -r)` |
 | Interface is up but `candump` is silent | Adapter wedged, or rover unpowered | `sudo can-selftest` tells you which |
 | Adapter works, then dies after every reboot | Some boards wedge on a warm reboot | See **USB-CAN adapters that need a replug** below |
-| Bus worked, then went silent mid-run | Adapter knocked loose | `can-watchdog.timer` re-runs `can.service` every 30 s; see `journalctl -u can-watchdog` |
+| Bus worked, then went silent mid-run | Adapter knocked loose, or a wiring or power glitch put the bus in bus-off | `can-watchdog.timer` re-runs `can.service` within 10 s, including after a bus-off, which the USB-CAN adapter cannot recover from by itself; see `journalctl -u can-watchdog` |
 | `Did not receive any data from the robot` | Same as above | Same as above |
 | `RTNETLINK answers: Operation not supported` | CAN-FD options on a classic-CAN adapter | Expected; `enablecan` falls back automatically |
 | Sticks and triggers swapped | Wrong gamepad map for this kernel | Re-run with `--jp6` or `--no-jp6` |
