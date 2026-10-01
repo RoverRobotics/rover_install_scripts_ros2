@@ -14,7 +14,8 @@
 # ROS_DISTRO will be set dynamically based on Ubuntu version
 # You can still override it manually later if needed.
 ROVER_REPO=https://github.com/RoverRobotics/roverrobotics_ros2.git
-IMU_REPO=https://github.com/flynneva/bno055.git
+IMU_REPO=https://github.com/ssharma0704/bno055.git
+IMU_BRANCH=fix-startup-race   # flynneva/bno055 + startup retry; upstream PR flynneva/bno055#85
 RPLIDAR_REPO=https://github.com/Slamtec/rplidar_ros.git
 REALSENSE_ROS_REPO=https://github.com/IntelRealSense/realsense-ros.git
 REALSENSE_ROS_BRANCH=ros2-master
@@ -63,7 +64,91 @@ print_boldblue(){
 }
 print_next_install() {
     install_number=$((install_number+1))
-    print_bold "[$install_number/$install_total]: ${1}"
+    local t=""
+    [ -n "$INSTALL_START" ] && t="   ($(fmt_dur $((SECONDS-INSTALL_START))) elapsed)"
+    print_bold "[$install_number/$install_total]: ${1}${t}"
+}
+
+INSTALL_LOG="$HOME/rover_setup.log"
+APT_LOCK_CONF=/etc/apt/apt.conf.d/90rover-installer-lock-wait
+
+fmt_dur() { printf '%d:%02d' $(( $1 / 60 )) $(( $1 % 60 )); }
+
+# Run a long command with its output in $INSTALL_LOG and a live status line:
+# spinner, bar, elapsed and remaining time against the usual duration ($2 s).
+run_with_progress() {
+    local label="$1" est="$2"; shift 2
+    echo "=== $(date '+%F %T') $label: $*" >> "$INSTALL_LOG"
+    if [ ! -t 1 ]; then
+        echo "  $label (usually about $(fmt_dur "$est"))..."
+        "$@" >> "$INSTALL_LOG" 2>&1
+        local rc=$?
+        [ $rc -eq 0 ] && echo "  done: $label" || echo "  FAILED: $label (details in $INSTALL_LOG)"
+        return $rc
+    fi
+    local mark; mark=$(wc -l < "$INSTALL_LOG")
+    "$@" >> "$INSTALL_LOG" 2>&1 &
+    local pid=$! start=$SECONDS spin='|/-\' i=0 c el pct fill bar left line cols w=20
+    trap 'kill $pid 2>/dev/null; printf "\n"; exit 130' INT
+    while kill -0 "$pid" 2>/dev/null; do
+        el=$((SECONDS - start))
+        pct=$(( est > 0 ? el * 100 / est : 0 )); [ $pct -gt 99 ] && pct=99
+        fill=$(( pct * w / 100 ))
+        bar=$(printf '%*s' "$fill" '' | tr ' ' '#')$(printf '%*s' $((w - fill)) '' | tr ' ' '.')
+        if [ "$el" -le "$est" ]; then left="about $(fmt_dur $((est - el))) left"
+        else left="taking longer than usual"; fi
+        cols=$(tput cols 2>/dev/null || echo 80)
+        c=${spin:i%4:1}; i=$((i + 1))
+        line=$(printf '  %s %s  [%s] %3d%%  %s elapsed, %s' "$c" "$label" "$bar" "$pct" "$(fmt_dur $el)" "$left")
+        printf '\r\033[K%s' "${line:0:$((cols - 1))}"
+        sleep 0.25
+    done
+    wait "$pid"; local rc=$?
+    trap - INT
+    el=$((SECONDS - start))
+    printf '\r\033[K'
+    if [ $rc -eq 0 ]; then
+        print_green "  done: $label ($(fmt_dur $el))"
+    else
+        print_red "  FAILED: $label after $(fmt_dur $el). Its last output (full log: $INSTALL_LOG):"
+        tail -n +$((mark + 1)) "$INSTALL_LOG" | tail -n 15 | sed 's/^/    /'
+    fi
+    return $rc
+}
+
+# Output is hidden behind the progress line, so a password prompt would be too:
+# ask once up front and keep the sudo timestamp fresh until the installer exits.
+start_sudo_keepalive() {
+    [ -n "$SUDO_KEEPALIVE_STARTED" ] && return 0
+    SUDO_KEEPALIVE_STARTED=1
+    sudo -v || { print_red "This installer needs sudo."; exit 1; }
+    ( while kill -0 $$ 2>/dev/null; do sudo -n true 2>/dev/null; sleep 50; done ) &
+}
+
+# apt fails at once when another apt holds the lock (unattended-upgrades, NVIDIA's
+# docker setup after nvidia-jetpack). Wait up to 10 min instead, for this run only;
+# the file also covers the apt calls inside Intel's RealSense script.
+start_apt_lock_wait() {
+    [ -n "$APT_LOCK_WAIT_STARTED" ] && return 0
+    APT_LOCK_WAIT_STARTED=1
+    echo 'DPkg::Lock::Timeout "600";' | sudo tee "$APT_LOCK_CONF" >/dev/null
+    trap 'sudo -n rm -f "$APT_LOCK_CONF"' EXIT
+}
+
+# Parallel jobs for the RealSense build: one per core, at most one per 2 GB of RAM
+# so a small Jetson does not run out of memory, never fewer than Intel's 2.
+build_jobs() {
+    local cores mem_gb jobs
+    cores=$(nproc 2>/dev/null || echo 2)
+    mem_gb=$(awk '/MemTotal/ {print int($2 / 1048576)}' /proc/meminfo 2>/dev/null)
+    if [ -z "$mem_gb" ] || [ "$mem_gb" -le 0 ]; then
+        jobs=2
+    else
+        jobs=$cores
+        [ $((mem_gb / 2)) -lt "$jobs" ] && jobs=$((mem_gb / 2))
+    fi
+    [ "$jobs" -lt 2 ] && jobs=2
+    echo "$jobs"
 }
 
 #########################################################################
@@ -83,13 +168,26 @@ Options:
   -w, --max-wheel IN   MAX wheel size in inches: 13 | 15
                        (MAX only; selects the config and URDF)
   -g, --gamepad PAD    ps4 | ps5. Which controller the teleop launch uses.
-  -d, --distro NAME    ROS 2 distro (humble, jazzy). Default: from Ubuntu version
-      --with-imu       Install the BNO055 IMU repository
-      --with-lidar     Install the RPLIDAR S2 repository
-      --with-realsense Install Intel RealSense support (SDK + ROS wrapper)
+  -d, --distro NAME    ROS 2 distro (humble, jazzy). Default: the one installed,
+                       or the one matching Ubuntu (22.04 humble, 24.04 jazzy)
+      --install-ros    If that ROS 2 is missing, install it without asking
+                       (runs ros2_installation.sh)
+      --with-service   Start the driver at boot (roverrobotics.service)
+      --with-can       Set up the USB-CAN adapter: can.service, can-watchdog,
+                       can-selftest (CAN robots; default yes)
+      --no-can         Skip the CAN setup without being asked
+      --with-imu       BNO055 IMU driver; with --with-service also flushes the
+                       IMU serial port before each driver start
+      --with-lidar     RPLIDAR S2 driver
+      --with-realsense Intel RealSense SDK and ROS wrapper
       --no-realsense   Skip RealSense without being asked
-      --with-rs-service  Install rover-realsense.service (implies --with-realsense)
-      --with-service   Install the roverrobotics.service autostart unit
+      --with-rs-service  Start the camera at boot: rover-realsense.service,
+                       USB reset, boot delay and a frame watchdog
+                       (implies --with-realsense)
+      --with-cyclone   Use Cyclone DDS for ROS 2 (default: Fast DDS)
+      --with-jetpack   Jetson + RealSense: install JetPack and CUDA first if
+                       CUDA is missing, so the camera SDK builds with CUDA
+      --no-jetpack     Never offer JetPack/CUDA
       --no-udev        Skip the udev rules (they are installed by default)
       --jp6            Force the JetPack 6 gamepad button/axis mapping
       --no-jp6         Force the stock gamepad button/axis mapping
@@ -101,6 +199,7 @@ Examples:
   ./setup_rover.sh
   ./setup_rover.sh --robot miti --gamepad ps5 --with-service -y
   ./setup_rover.sh -r max -w 13 -g ps5 -d humble --with-imu -y
+  ./setup_rover.sh -r miti -g ps5 --with-service --with-imu --with-rs-service --with-cyclone -y
 EOF_USAGE
 }
 
@@ -115,6 +214,10 @@ ARG_MAXWHEEL=""
 ARG_GAMEPAD=""
 ARG_REALSENSE=""
 ARG_RS_SERVICE=""
+ARG_CAN=""
+ARG_CYCLONE=""
+ARG_INSTALL_ROS=""
+ARG_JETPACK=""
 ASSUME_YES=false
 
 while [ $# -gt 0 ]; do
@@ -129,6 +232,13 @@ while [ $# -gt 0 ]; do
         --no-realsense)   ARG_REALSENSE=false; shift ;;
         --with-rs-service) ARG_REALSENSE=true; ARG_RS_SERVICE=true; shift ;;
         --with-service) ARG_SERVICE=true; shift ;;
+        --with-can)    ARG_CAN=true; shift ;;
+        --no-can)      ARG_CAN=false; shift ;;
+        --with-cyclone) ARG_CYCLONE=true; shift ;;
+        --install-ros) ARG_INSTALL_ROS=true; shift ;;
+        --with-jetpack) ARG_JETPACK=true; shift ;;
+        --no-jetpack)  ARG_JETPACK=false; shift ;;
+        --no-cyclone)  ARG_CYCLONE=false; shift ;;
         --no-udev)     ARG_UDEV=false; shift ;;
         --jp6)         ARG_JP6=true; shift ;;
         --no-jp6)      ARG_JP6=false; shift ;;
@@ -148,64 +258,100 @@ else
     UBUNTU_VERSION=""
 fi
 
-SUGGESTED_ROS_DISTRO=""
+# ROS 2 distro that matches this Ubuntu release; the driver branch has the same name
 case "$UBUNTU_VERSION" in
-    "22.04")
-        SUGGESTED_ROS_DISTRO="humble"
-        ;;
-    "24.04")
-        SUGGESTED_ROS_DISTRO="jazzy"
-        ;;
-    *)
-        # Fallback suggestion; user can override
-        SUGGESTED_ROS_DISTRO="humble"
-        ;;
+    22.04) SUGGESTED_ROS_DISTRO="humble" ;;
+    24.04) SUGGESTED_ROS_DISTRO="jazzy" ;;
+    *)     SUGGESTED_ROS_DISTRO="" ;;
 esac
 
-echo "Detected Ubuntu version: ${UBUNTU_VERSION:-unknown}"
+INSTALLED_DISTROS=$(ls /opt/ros 2>/dev/null | grep -xE 'humble|jazzy' | tr '\n' ' ' | sed 's/ $//')
+echo "Detected Ubuntu ${UBUNTU_VERSION:-unknown}; ROS 2 installed: ${INSTALLED_DISTROS:-none}"
+
+if command -v whiptail >/dev/null 2>&1 && [ "$ASSUME_YES" != true ]; then
+    EARLY_WT=true
+else
+    EARLY_WT=false
+fi
+EARLY_BACK="Rover Robotics ROS 2 setup  |  Ubuntu ${UBUNTU_VERSION:-unknown}"
+
+early_yesno() {
+    # Usage: early_yesno "question" yes|no ; returns 0 for yes
+    if [ "$EARLY_WT" = true ]; then
+        local def=""; [ "$2" = no ] && def="--defaultno"
+        whiptail --backtitle "$EARLY_BACK" --title "ROS 2" $def --yesno "$1" 16 74
+        return
+    fi
+    local yn hint="Y/n"; [ "$2" = no ] && hint="y/N"
+    read -p "$(echo -e "$1") [$hint]: " yn
+    case "${yn:-$2}" in [Yy]*) return 0 ;; *) return 1 ;; esac
+}
+
+offer_ros_install() {
+    local d="$1"
+    if [ "$ASSUME_YES" = true ] && [ "$ARG_INSTALL_ROS" != true ]; then
+        print_red "ROS 2 $d is not installed. Add --install-ros to install it, or run:"
+        echo "    ./ros2_installation.sh -d $d"
+        exit 1
+    fi
+    if [ "$ARG_INSTALL_ROS" != true ] && ! early_yesno \
+"ROS 2 $d is not installed on this computer.
+
+Ubuntu ${UBUNTU_VERSION:-unknown} uses ROS 2 $d, and the rover driver will use
+its '$d' branch.
+
+Install ROS 2 $d (desktop) now? It takes 15 to 30 minutes." yes; then
+        echo "Nothing was changed. Install ROS 2 later with:"
+        echo "    ./ros2_installation.sh -d $d"
+        exit 0
+    fi
+    print_bold "Installing ROS 2 $d with ros2_installation.sh"
+    # the ROS install is the first apt work on a bare computer, so it waits for the lock too
+    start_sudo_keepalive
+    start_apt_lock_wait
+    local yflag=""; [ "$ASSUME_YES" = true ] && yflag="-y"
+    if ! bash "$SCRIPT_DIR/ros2_installation.sh" -d "$d" -p desktop $yflag || [ ! -d "/opt/ros/$d" ]; then
+        print_red "ROS 2 $d installation did not complete; see the messages above."
+        exit 1
+    fi
+    print_green "ROS 2 $d installed"
+    echo ""
+}
 
 if [ -n "$ARG_DISTRO" ]; then
     ROS_DISTRO="$ARG_DISTRO"
-elif [ "$ASSUME_YES" = true ]; then
+    case "$ROS_DISTRO" in
+        humble|jazzy) ;;
+        *) print_red "Unsupported ROS 2 distro '$ROS_DISTRO' (use humble or jazzy)"; exit 1 ;;
+    esac
+    [ -d "/opt/ros/$ROS_DISTRO" ] || offer_ros_install "$ROS_DISTRO"
+elif [ -z "$INSTALLED_DISTROS" ]; then
+    if [ -z "$SUGGESTED_ROS_DISTRO" ]; then
+        print_red "Ubuntu ${UBUNTU_VERSION:-unknown} is not supported."
+        echo "Use Ubuntu 22.04 (ROS 2 Humble) or Ubuntu 24.04 (ROS 2 Jazzy)."
+        exit 1
+    fi
     ROS_DISTRO="$SUGGESTED_ROS_DISTRO"
+    offer_ros_install "$ROS_DISTRO"
+elif [ "$(wc -w <<< "$INSTALLED_DISTROS")" -eq 1 ]; then
+    ROS_DISTRO="$INSTALLED_DISTROS"
+elif [[ " $INSTALLED_DISTROS " == *" $SUGGESTED_ROS_DISTRO "* ]]; then
+    ROS_DISTRO="$SUGGESTED_ROS_DISTRO"
+elif [ "$EARLY_WT" = true ]; then
+    ROS_DISTRO=$(whiptail --backtitle "$EARLY_BACK" --title "ROS 2" --menu \
+        "More than one ROS 2 is installed. Which should the rover use?" 14 64 2 \
+        humble "ROS 2 Humble (Ubuntu 22.04)" jazzy "ROS 2 Jazzy (Ubuntu 24.04)" \
+        3>&1 1>&2 2>&3) || { echo "Cancelled. Nothing was changed."; exit 0; }
 else
-    while true; do
-        if [ -n "$SUGGESTED_ROS_DISTRO" ]; then
-            read -p "Suggested ROS 2 distribution is '${SUGGESTED_ROS_DISTRO}'. Use this? [Y/n]: " yn
-            case "$yn" in
-                [Yy]|"" )
-                    ROS_DISTRO="$SUGGESTED_ROS_DISTRO"
-                    break
-                    ;;
-                [Nn] )
-                    read -p "Enter ROS 2 distribution to use (e.g. humble, jazzy): " ROS_DISTRO
-                    [ -n "$ROS_DISTRO" ] && break
-                    ;;
-                * )
-                    echo "Please answer yes or no."
-                    ;;
-            esac
-        else
-            read -p "Could not determine Ubuntu version. Enter ROS 2 distribution to use (e.g. humble, jazzy): " ROS_DISTRO
-            [ -n "$ROS_DISTRO" ] && break
-        fi
-    done
+    read -p "More than one ROS 2 is installed ($INSTALLED_DISTROS). Which should the rover use? " ROS_DISTRO
+    case "$ROS_DISTRO" in humble|jazzy) ;; *) print_red "Unknown distro '$ROS_DISTRO'"; exit 1 ;; esac
 fi
 
-echo "Using ROS 2 distribution: $ROS_DISTRO"
+if [ -n "$SUGGESTED_ROS_DISTRO" ] && [ "$ROS_DISTRO" != "$SUGGESTED_ROS_DISTRO" ]; then
+    print_yellow "Note: ROS 2 $ROS_DISTRO is not the usual release for Ubuntu $UBUNTU_VERSION ($SUGGESTED_ROS_DISTRO)."
+fi
+echo "Using ROS 2 $ROS_DISTRO; the driver uses its '$ROS_DISTRO' branch."
 echo ""
-
-# Fail early rather than printing a dozen "package not found" lines later
-if [ ! -d "/opt/ros/$ROS_DISTRO" ]; then
-    print_red "ROS 2 '$ROS_DISTRO' is not installed (/opt/ros/$ROS_DISTRO not found)."
-    echo ""
-    echo "Install it first:"
-    echo "    ./ros2_installation.sh"
-    echo ""
-    echo "Or pass a distro that is installed:  ./setup_rover.sh --distro <name>"
-    echo "Installed distros: $(ls /opt/ros 2>/dev/null | tr '\n' ' ')"
-    exit 1
-fi
 
 #########################################################################
 #                DETECT PLATFORM (JETSON / L4T / JETPACK 6)             #
@@ -252,30 +398,54 @@ packages=(
     "can-utils"    # candump / cansend
 )
 
+yes_no() { [ "$1" = true ] && echo "yes" || echo "no"; }
+
+install_summary() {
+    local pad="${gamepad^^}"
+    [ "$use_jp6" = true ] && pad="$pad, JetPack 6 map"
+    local dds="Fast DDS"
+    [ "$install_cyclone" = true ] && dds="Cyclone DDS"
+    local rs; rs=$(yes_no "$install_realsense_opt")
+    [ "$install_rs_service" = true ] && rs="yes, starts at boot with watchdog"
+    echo "Platform:          $PLATFORM_DESC"
+    echo "Robot:             $device_type${max_variant:+ ($max_variant)}"
+    echo "Controller:        $pad"
+    echo "ROS 2:             $ROS_DISTRO, $dds"
+    echo "Workspace:         $WORKSPACE_DIR"
+    echo "Driver repository: $(yes_no "$install_repo")"
+    echo "Driver at boot:    $(yes_no "$install_service")"
+    [ "$is_can_robot" = true ] && \
+    echo "CAN adapter:       $(yes_no "$install_can")"
+    echo "BNO055 IMU:        $(yes_no "$install_imu")"
+    echo "RealSense camera:  $rs"
+    [ "$install_jetpack" = true ] && \
+    echo "JetPack + CUDA:    yes, installed before the camera SDK"
+    echo "RPLidar S2:        $(yes_no "$install_s2")"
+    echo "Udev rules:        $(yes_no "$install_udev")"
+}
+
 print_install_settings() {
     print_bold "====================================="
-    print_boldblue "                                     "
-    print_bold "Installation settings:               "
-    print_bold "----------------------------         "
-    print_boldblue "Platform:      $PLATFORM_DESC       "
-    print_boldblue "Robot type:    $device_type          "
-    [ "$device_type" = "max" ] && \
-    print_boldblue "MAX wheels:    $max_variant          "
-    print_boldblue "Controller:    $gamepad              "
-    print_boldblue "JP6 pad map:   $use_jp6              "
-    print_boldblue "ROS 2 Distro:  $ROS_DISTRO           "
-    print_boldblue "Workspace:     $WORKSPACE_DIR        "
-    print_boldblue "Repo install:  $install_repo         "
-    print_boldblue "Service:       $install_service      "
-    print_boldblue "Udev:          $install_udev         "
-    print_boldblue "CAN iface:     $CAN_IFACE            "
-    print_boldblue "BNO055 IMU:    $install_imu          "
-    print_boldblue "RPLidar S2:    $install_s2           "
-    print_boldblue "RealSense:     $install_realsense_opt (service: $install_rs_service)"
-    print_boldblue "                                     "
+    print_bold "Installation settings"
+    print_bold "-------------------------------------"
+    while IFS= read -r line; do print_boldblue "$line"; done < <(install_summary)
     print_bold "====================================="
     echo ""
 }
+
+confirm_install() {
+    [ "$ASSUME_YES" = true ] && return 0
+    if [ "$USE_WHIPTAIL" = true ]; then
+        whiptail --backtitle "$WT_BACK" --title "Step 4 of 4 · Review" --yes-button "Install" --no-button "Cancel" \
+            --yesno "$(install_summary)\n\nNothing has been changed yet." 22 74 || { echo "Cancelled. Nothing was changed."; exit 0; }
+    else
+        print_install_settings
+        read -p "Install with these settings? [Y/n]: " yn
+        case "${yn:-y}" in [Yy]*) ;; *) echo "Cancelled. Nothing was changed."; exit 0 ;; esac
+    fi
+}
+
+WT_BACK="Rover Robotics ROS 2 setup  |  Ubuntu ${UBUNTU_VERSION:-?}  |  $PLATFORM_DESC  |  ROS 2 $ROS_DISTRO"
 
 # UI helper: use whiptail if available, otherwise fall back to plain read
 if command -v whiptail >/dev/null 2>&1 && [ "$ASSUME_YES" != true ]; then
@@ -297,9 +467,9 @@ ask_yes_no() {
         local height=10
         local width=70
         if [ "$default" = "no" ]; then
-            whiptail --title "Rover Setup" --defaultno --yesno "$question" $height $width
+            whiptail --backtitle "$WT_BACK" --title "Rover Setup" --defaultno --yesno "$question" $height $width
         else
-            whiptail --title "Rover Setup" --yesno "$question" $height $width
+            whiptail --backtitle "$WT_BACK" --title "Rover Setup" --yesno "$question" $height $width
         fi
         local exitstatus=$?
         if [ $exitstatus -eq 0 ]; then
@@ -348,15 +518,15 @@ select_robot_type() {
 
     if [ "$USE_WHIPTAIL" = true ]; then
         choice=$(
-            whiptail --title "Select Rover Type" --menu "Choose your robot: (Use Arrow Keys to Navigate and Enter Key to Select)" 18 60 8 \
-                "1" "Mini 2WD" \
-                "2" "Mini (4WD)" \
-                "3" "Miti 65" \
-                "4" "Miti" \
-                "5" "Zero" \
-                "6" "Pro" \
-                "7" "Max" \
-                "8" "Mega" \
+            whiptail --backtitle "$WT_BACK" --title "Step 1 of 4 · Robot" --menu "Which rover is this?\n\nArrow keys to move, Enter to select, Esc to cancel." 20 64 8 \
+                "1" "Mini 2WD   ·  2WD, serial" \
+                "2" "Mini       ·  4WD, CAN" \
+                "3" "MITI 65    ·  4WD, CAN" \
+                "4" "MITI       ·  4WD, CAN" \
+                "5" "Zero       ·  2WD, serial" \
+                "6" "Pro        ·  serial" \
+                "7" "MAX        ·  4WD, CAN (13 or 15 inch wheels)" \
+                "8" "MEGA       ·  4WD, CAN" \
                 3>&1 1>&2 2>&3
         )
         [ $? -ne 0 ] && echo "Cancelled." && exit 1
@@ -424,7 +594,7 @@ select_max_variant() {
 
     if [ "$USE_WHIPTAIL" = true ]; then
         choice=$(
-            whiptail --title "Select MAX Wheel Size" --menu "Which wheels are fitted to this MAX?\n(Use Arrow Keys to Navigate and Enter Key to Select)" 16 66 2 \
+            whiptail --backtitle "$WT_BACK" --title "Step 1 of 4 · MAX wheels" --menu "Which wheels are fitted to this MAX?\nThe wrong size scales odometry and speed." 14 66 2 \
                 "1" "13 inch   (max_130)" \
                 "2" "15 inch   (max_150)" \
                 3>&1 1>&2 2>&3
@@ -466,7 +636,7 @@ select_gamepad() {
 
     if [ "$USE_WHIPTAIL" = true ]; then
         choice=$(
-            whiptail --title "Select Controller" --menu "Which controller will you drive this rover with?\n(Use Arrow Keys to Navigate and Enter Key to Select)" 16 66 2 \
+            whiptail --backtitle "$WT_BACK" --title "Step 2 of 4 · Controller" --menu "Which controller will you drive this rover with?" 14 66 2 \
                 "1" "PS4 / DualShock 4" \
                 "2" "PS5 / DualSense" \
                 3>&1 1>&2 2>&3
@@ -491,37 +661,132 @@ select_gamepad() {
     fi
 }
 
-# RealSense install differs by platform, so ask separately from the service.
-select_realsense() {
-    if [ -n "$ARG_REALSENSE" ]; then
-        install_realsense_opt="$ARG_REALSENSE"
-    elif [ "$ASSUME_YES" = true ]; then
-        install_realsense_opt=false
-    else
-        ask_yes_no "Install the Intel RealSense camera support (D435i etc.)?\n\nOn a Jetson this builds the librealsense SDK from source and can take ~45 minutes.\nOn x86 it installs Intel's prebuilt packages and is quick." no install_realsense_opt
-    fi
-
+# One checklist; each item installs everything it needs, services and watchdogs included.
+select_components() {
+    install_service=false
+    install_can=$is_can_robot
+    install_imu=false
+    install_realsense_opt=false
     install_rs_service=false
-    [ "$install_realsense_opt" != true ] && return
+    install_s2=false
+    install_udev=true
+    install_cyclone=false
 
-    if [ -n "$ARG_RS_SERVICE" ]; then
-        install_rs_service="$ARG_RS_SERVICE"
-    elif [ "$ASSUME_YES" = true ]; then
-        install_rs_service=false
+    if [ "$ASSUME_YES" = true ]; then
+        :
+    elif [ "$USE_WHIPTAIL" = true ]; then
+        local items=("SERVICE" "Start the driver at boot" OFF)
+        [ "$is_can_robot" = true ] && \
+            items+=("CAN" "USB-CAN adapter: bring-up, watchdog, self-test" ON)
+        items+=("IMU"        "BNO055 IMU (serial flush before each driver start)" OFF
+                "REALSENSE"  "Intel RealSense SDK + ROS wrapper (~45 min on Jetson)" OFF
+                "RS_SERVICE" "Start the camera at boot, with USB reset and watchdog" OFF
+                "LIDAR"      "RPLIDAR S2 driver" OFF
+                "UDEV"       "Udev rules for sensors and serial rovers" ON
+                "CYCLONE"    "Cyclone DDS instead of the default Fast DDS" OFF)
+        local choices
+        choices=$(whiptail --backtitle "$WT_BACK" --title "Step 3 of 4 · Components" --checklist \
+            "Choose what to set up. Space selects, Enter confirms.\nEach item installs its own services and watchdogs." \
+            20 78 $(( ${#items[@]} / 3 )) "${items[@]}" 3>&1 1>&2 2>&3) \
+            || { echo "Cancelled. Nothing was changed."; exit 0; }
+        install_can=false
+        install_udev=false
+        for c in $choices; do
+            case "${c//\"/}" in
+                SERVICE)    install_service=true ;;
+                CAN)        install_can=true ;;
+                IMU)        install_imu=true ;;
+                REALSENSE)  install_realsense_opt=true ;;
+                RS_SERVICE) install_rs_service=true ;;
+                LIDAR)      install_s2=true ;;
+                UDEV)       install_udev=true ;;
+                CYCLONE)    install_cyclone=true ;;
+            esac
+        done
     else
-        ask_yes_no "Install rover-realsense.service to start the camera at boot?\n\nIt power-cycles the camera over USB before each start, which recovers\nfrom the enumeration failures the D435i is prone to." yes install_rs_service
+        ask_yes_no "Start the driver automatically at boot?" no install_service
+        [ "$is_can_robot" = true ] && \
+            ask_yes_no "Set up the USB-CAN adapter (bring-up service, watchdog, self-test)?" yes install_can
+        ask_yes_no "Install the BNO055 IMU (with a serial flush before each driver start)?" no install_imu
+        ask_yes_no "Install Intel RealSense support? On a Jetson the SDK build takes ~45 minutes." no install_realsense_opt
+        [ "$install_realsense_opt" = true ] && \
+            ask_yes_no "Start the camera at boot, with USB reset and a frame watchdog?" yes install_rs_service
+        ask_yes_no "Install the RPLIDAR S2 driver?" no install_s2
+        ask_yes_no "Install the udev rules?" yes install_udev
+        ask_yes_no "Use Cyclone DDS instead of the default Fast DDS?" no install_cyclone
     fi
+
+    # command-line flags win over the menu
+    [ -n "$ARG_SERVICE" ]    && install_service="$ARG_SERVICE"
+    [ -n "$ARG_CAN" ]        && install_can="$ARG_CAN"
+    [ -n "$ARG_IMU" ]        && install_imu="$ARG_IMU"
+    [ -n "$ARG_REALSENSE" ]  && install_realsense_opt="$ARG_REALSENSE"
+    [ -n "$ARG_RS_SERVICE" ] && install_rs_service="$ARG_RS_SERVICE"
+    [ -n "$ARG_LIDAR" ]      && install_s2="$ARG_LIDAR"
+    [ -n "$ARG_UDEV" ]       && install_udev="$ARG_UDEV"
+    [ -n "$ARG_CYCLONE" ]    && install_cyclone="$ARG_CYCLONE"
+
+    [ "$is_can_robot" = true ] || install_can=false
+    [ "$install_rs_service" = true ] && install_realsense_opt=true
+    [ "$install_realsense_opt" = true ] || install_rs_service=false
+
+    install_jetpack=false
+    if [ "$IS_TEGRA" = true ] && [ "$install_realsense_opt" = true ] && ! cuda_present; then
+        if [ -n "$ARG_JETPACK" ]; then
+            install_jetpack="$ARG_JETPACK"
+        elif [ "$ASSUME_YES" != true ]; then
+            ask_yes_no "CUDA was not found on this Jetson.\n\nThe RealSense SDK is built on this computer, and with CUDA the camera\nimage processing runs on the GPU instead of the CPU.\n\nInstall NVIDIA JetPack and CUDA first? Large download, about 20 minutes.\nWithout it the SDK is built for the CPU only." yes install_jetpack
+        fi
+    fi
+}
+
+cuda_present() {
+    command -v nvcc >/dev/null 2>&1 || [ -x /usr/local/cuda/bin/nvcc ]
+}
+
+install_jetpack_cuda() {
+    if dpkg -s nvidia-jetpack >/dev/null 2>&1; then
+        print_green "  nvidia-jetpack already installed"
+    elif apt-cache show nvidia-jetpack >/dev/null 2>&1; then
+        print_italic "  installing nvidia-jetpack (large download)..."
+        run_with_progress "Installing nvidia-jetpack" 1200 sudo apt-get install -y nvidia-jetpack \
+            && print_green "  nvidia-jetpack installed" \
+            || print_yellow "  nvidia-jetpack did not install; trying CUDA on its own"
+    else
+        print_yellow "  nvidia-jetpack is not in apt (L4T apt source missing?); trying CUDA on its own"
+    fi
+    # JetPack already brings the CUDA runtime; add only the development tools if nvcc is still missing
+    if ! cuda_present; then
+        run_with_progress "Installing nvidia-cuda-dev" 300 sudo apt-get install -y nvidia-cuda-dev
+    fi
+    if [ -d /usr/local/cuda/bin ]; then
+        if ! grep -q "/usr/local/cuda/bin" ~/.bashrc 2>/dev/null; then
+            echo 'export PATH=/usr/local/cuda/bin:$PATH' >> ~/.bashrc
+            echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
+        fi
+        export PATH=/usr/local/cuda/bin:$PATH
+        export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
+    fi
+    cuda_present
 }
 
 # librealsense SDK. Intel ships prebuilt debs for x86 only; there is no arm64
 # build in their apt repo, so a Jetson has to build from source (with CUDA when
 # available).
+_rs_build_deps() {
+    for p in libssl-dev libusb-1.0-0-dev libudev-dev libgtk-3-dev libglfw3-dev \
+             libgl1-mesa-dev libglu1-mesa-dev at libomp-dev cmake wget; do
+        sudo apt-get install -y "$p"
+    done
+    return 0
+}
+
 install_librealsense() {
     if [ "$IS_TEGRA" = true ]; then
         print_italic "  Jetson detected: building librealsense from source"
 
         if command -v realsense-viewer >/dev/null 2>&1; then
-            ask_yes_no "librealsense already appears installed.\nRebuild it (~45 minutes)?" no rs_rebuild
+            ask_yes_no "librealsense already appears installed.\nRebuild it (the longest step)?" no rs_rebuild
             if [ "$rs_rebuild" != true ]; then
                 print_green "  keeping the existing librealsense install"
                 return 0
@@ -534,13 +799,16 @@ install_librealsense() {
             [ "$rs_go" != true ] && { print_yellow "  RealSense SDK build skipped"; return 1; }
         fi
 
-        for p in libssl-dev libusb-1.0-0-dev libudev-dev libgtk-3-dev libglfw3-dev \
-                 libgl1-mesa-dev libglu1-mesa-dev at libomp-dev cmake wget; do
-            sudo apt-get install -y "$p" >/dev/null 2>&1
-        done
+        run_with_progress "Installing the SDK build dependencies" 120 _rs_build_deps
 
         local cuda=off
-        if command -v nvcc >/dev/null 2>&1 || [ -d /usr/local/cuda ]; then
+        # ~/.bashrc only reaches new terminals; this run needs nvcc too, or CMake
+        # fails with "Failed to detect a default CUDA architecture"
+        if [ -x /usr/local/cuda/bin/nvcc ]; then
+            export PATH=/usr/local/cuda/bin:$PATH
+            export CUDACXX=/usr/local/cuda/bin/nvcc
+        fi
+        if command -v nvcc >/dev/null 2>&1; then
             cuda=on
             print_green "  CUDA found, building with CUDA support"
         else
@@ -564,9 +832,18 @@ install_librealsense() {
             print_yellow "  libuvc_installation.sh still has a prompt; upstream may have changed"
         fi
 
+        local jobs rs_est
+        jobs=$(build_jobs)
+        sed -i "s|^make -j[0-9]*\$|make -j$jobs|" libuvc_installation.sh
+        if grep -q "^make -j$jobs\$" libuvc_installation.sh; then
+            print_italic "  building with $jobs parallel jobs ($(nproc) cores, $(awk '/MemTotal/ {print int($2 / 1048576)}' /proc/meminfo) GB RAM)"
+        else
+            print_yellow "  could not set the build job count; upstream may have changed"
+        fi
+        rs_est=$(( 2700 * 2 / jobs )); [ "$rs_est" -lt 600 ] && rs_est=600
+
         chmod +x ./libuvc_installation.sh
-        print_italic "  building librealsense (this can take ~45 minutes)..."
-        if ./libuvc_installation.sh; then
+        if run_with_progress "Building librealsense" "$rs_est" ./libuvc_installation.sh; then
             print_green "  librealsense installed. You can plug the camera back in."
         else
             print_red "  librealsense build failed. Verify with: realsense-viewer"
@@ -674,6 +951,8 @@ Type=simple
 User=$USER
 Environment=HOME=$HOME
 WorkingDirectory=$HOME
+# a camera missing at boot never recovers, so let USB enumerate it first
+ExecStartPre=/bin/sleep 20
 # leading '-' so a missing sudoers rule cannot stop the camera starting at all
 ExecStartPre=-/usr/bin/sudo -n /usr/local/sbin/reset_realsense_usb.sh
 ExecStart=/bin/bash -c 'source /opt/ros/$ROS_DISTRO/setup.bash && source $WORKSPACE_DIR/install/setup.bash && exec ros2 launch realsense2_camera rs_launch.py'
@@ -685,8 +964,178 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF_RSSVC
 
+    [ "$install_cyclone" = true ] && \
+        sudo sed -i '/^Environment=HOME=/a Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' \
+            /etc/systemd/system/rover-realsense.service
+
+    create_realsense_watchdog
+
     sudo systemctl daemon-reload
     sudo systemctl enable rover-realsense.service
+    sudo systemctl enable --now realsense-watchdog.timer
+}
+
+# The node can stay up while publishing nothing, which systemd cannot see; judge the topic.
+create_realsense_watchdog() {
+    sudo tee /usr/local/sbin/realsense-probe >/dev/null <<'EOF_RSPROBE'
+#!/usr/bin/env python3
+# Exit 0 if a frame arrives on the topic within the timeout, else 1.
+import sys, time
+import rclpy
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Image
+
+topic   = sys.argv[1] if len(sys.argv) > 1 else '/camera/camera/color/image_raw'
+timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 15.0
+
+rclpy.init(args=None)
+node = rclpy.create_node('realsense_probe')
+seen = []
+# best effort: a reliable subscriber never matches an image publisher
+node.create_subscription(Image, topic, lambda _m: seen.append(1),
+                         qos_profile_sensor_data)
+
+deadline = time.monotonic() + timeout
+while rclpy.ok() and not seen and time.monotonic() < deadline:
+    rclpy.spin_once(node, timeout_sec=0.2)
+
+node.destroy_node()
+rclpy.shutdown()
+sys.exit(0 if seen else 1)
+EOF_RSPROBE
+    sudo chmod +x /usr/local/sbin/realsense-probe
+
+    sudo tee /usr/sbin/realsense-watchdog >/dev/null <<'EOF_RSWD'
+#!/bin/bash
+# Restart rover-realsense.service when a RealSense is on USB but no frames arrive.
+TOPIC=/camera/camera/color/image_raw
+UNIT=rover-realsense.service
+PROBE=/usr/local/sbin/realsense-probe
+SETTLE=15
+WAIT=6
+
+# no camera fitted, or the unit is stopped on purpose: nothing to do
+lsusb | grep -qiE '8086:0b[0-9a-f]{2}' || exit 0
+systemctl is-active --quiet "$UNIT" || exit 0
+
+# give a fresh start time to open the sensors
+since=$(systemctl show "$UNIT" -p ActiveEnterTimestampMonotonic --value)
+now=$(awk '{printf "%d", $1 * 1000000}' /proc/uptime)
+[ -n "$since" ] && [ "$since" -gt 0 ] || exit 0
+[ $(( (now - since) / 1000000 )) -ge "$SETTLE" ] || exit 0
+
+export HOME=RUN_HOME_PLACEHOLDER
+# probe with the unit's own ROS env
+for kv in $(systemctl show "$UNIT" -p Environment --value); do
+    case "$kv" in ROS_*|RMW_*) export "$kv" ;; esac
+done
+source /opt/ros/ROS_DISTRO_PLACEHOLDER/setup.bash >/dev/null 2>&1
+source WORKSPACE_PLACEHOLDER/install/setup.bash   >/dev/null 2>&1
+
+"$PROBE" "$TOPIC" "$WAIT" && exit 0
+sleep 3
+"$PROBE" "$TOPIC" "$WAIT" && exit 0
+
+echo "realsense-watchdog: no frame on $TOPIC across two ${WAIT}s probes; restarting $UNIT"
+systemctl restart "$UNIT"
+EOF_RSWD
+    sudo sed -i "s|RUN_HOME_PLACEHOLDER|$HOME|; s|ROS_DISTRO_PLACEHOLDER|$ROS_DISTRO|; s|WORKSPACE_PLACEHOLDER|$WORKSPACE_DIR|" \
+        /usr/sbin/realsense-watchdog
+    sudo chmod +x /usr/sbin/realsense-watchdog
+
+    sudo tee /etc/systemd/system/realsense-watchdog.service >/dev/null <<'EOF_RSWDSVC'
+[Unit]
+Description=Restart rover-realsense.service if the camera has stopped publishing
+After=rover-realsense.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120
+ExecStart=/usr/sbin/realsense-watchdog
+EOF_RSWDSVC
+
+    sudo tee /etc/systemd/system/realsense-watchdog.timer >/dev/null <<'EOF_RSWDTMR'
+[Unit]
+Description=Periodically verify the RealSense is publishing frames
+
+[Timer]
+OnBootSec=20
+OnUnitActiveSec=20
+AccuracySec=1
+Unit=realsense-watchdog.service
+
+[Install]
+WantedBy=timers.target
+EOF_RSWDTMR
+}
+
+# Flushes the BNO055 UART before each driver start, so a desynced port cannot sustain a restart loop.
+create_bno055_reset() {
+    sudo tee /usr/local/sbin/reset_bno055_usb.sh >/dev/null <<'EOF_IMURESET'
+#!/bin/bash
+# Flush the BNO055 serial port; power-cycle its FT232H only if the port is missing.
+# Always exits 0 so the driver still starts without an IMU.
+PORT=/dev/bno055
+
+if [ -e "$PORT" ]; then
+  python3 - "$PORT" <<'PY' 2>/dev/null || true
+import os, sys, termios, time
+try:
+    fd = os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+except OSError:
+    sys.exit(0)
+try:
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    time.sleep(0.2)
+    try:
+        while os.read(fd, 4096):
+            pass
+    except OSError:
+        pass
+    termios.tcflush(fd, termios.TCIOFLUSH)
+    print("reset_bno055_usb: flushed %s" % sys.argv[1])
+finally:
+    os.close(fd)
+PY
+  exit 0
+fi
+
+for idv in /sys/bus/usb/devices/*/idVendor; do
+  dev="${idv%/idVendor}"
+  [ "$(cat "$idv" 2>/dev/null)" = "0403" ] || continue
+  [ "$(cat "$dev/idProduct" 2>/dev/null)" = "6014" ] || continue
+  auth="$dev/authorized"
+  if [ -w "$auth" ]; then
+    echo 0 > "$auth"; sleep 1
+    echo 1 > "$auth"
+    echo "reset_bno055_usb: power-cycled FT232H at $(basename "$dev")"
+    command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=5
+    sleep 2   # BNO055 needs time to boot before the node opens it
+  fi
+done
+exit 0
+EOF_IMURESET
+    sudo chmod +x /usr/local/sbin/reset_bno055_usb.sh
+
+    echo "$USER ALL=(root) NOPASSWD: /usr/local/sbin/reset_bno055_usb.sh" \
+        | sudo tee /etc/sudoers.d/rover-bno055 >/dev/null
+    sudo chmod 0440 /etc/sudoers.d/rover-bno055
+    if ! sudo visudo -cf /etc/sudoers.d/rover-bno055 >/dev/null 2>&1; then
+        sudo rm -f /etc/sudoers.d/rover-bno055
+        print_yellow "  sudoers drop-in failed validation and was removed;"
+        print_yellow "  the driver will start without flushing the IMU port."
+    fi
+}
+
+setup_cyclone() {
+    try_install_package "ros-$ROS_DISTRO-rmw-cyclonedds-cpp" || return 1
+    # every login shell and every service must agree, or nodes do not see each other
+    grep -Fqx "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" ~/.bashrc 2>/dev/null ||
+        echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" >> ~/.bashrc
+    grep -q "^RMW_IMPLEMENTATION=" /etc/environment 2>/dev/null ||
+        echo "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" | sudo tee -a /etc/environment >/dev/null
+    ros2 daemon stop >/dev/null 2>&1
+    return 0
 }
 
 # Clone, or update in place. Plain `git clone` fails when the dir exists.
@@ -699,7 +1148,7 @@ clone_or_update() {
 
     if [ -d "$dest/.git" ]; then
         print_italic "  $name already present, updating"
-        git -C "$dest" fetch --all --prune >/dev/null 2>&1
+        run_with_progress "Fetching $name" 20 git -C "$dest" fetch --all --prune
         if [ -n "$branch" ]; then
             git -C "$dest" checkout "$branch" >/dev/null 2>&1
         fi
@@ -717,9 +1166,9 @@ clone_or_update() {
     fi
 
     if [ -n "$branch" ]; then
-        git clone "$url" -b "$branch" "$dest" >/dev/null 2>&1
+        run_with_progress "Cloning $name" 30 git clone "$url" -b "$branch" "$dest"
     else
-        git clone "$url" "$dest" >/dev/null 2>&1
+        run_with_progress "Cloning $name" 30 git clone "$url" "$dest"
     fi
 
     if [ $? -ne 0 ]; then
@@ -787,6 +1236,13 @@ patch_max_launch() {
         print_green "  Config -> ${max_variant}_config.yaml"
     else
         print_yellow "  max.launch.py config path was hand-edited; left as-is"
+    fi
+
+    # max_teleop.launch.py reads the controller limits from the same config; older trees do not
+    local tf="$ROVER_ROS2_DIR/roverrobotics_driver/launch/max_teleop.launch.py"
+    if [ -f "$tf" ] && grep -q "'max_[0-9]\+_config\.yaml'" "$tf"; then
+        sed -i "s|'max_[0-9]\+_config\.yaml'|'${max_variant}_config.yaml'|" "$tf"
+        print_green "  Teleop -> ${max_variant}_config.yaml (controller limits)"
     fi
 }
 
@@ -911,6 +1367,15 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF3
+
+    local unit=/etc/systemd/system/roverrobotics.service
+    [ "$install_cyclone" = true ] && \
+        sudo sed -i '/^Environment=HOME=/a Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' "$unit"
+    if [ "$install_imu" = true ]; then
+        create_bno055_reset
+        # leading '-' so a failed flush never stops the driver starting
+        sudo sed -i '/^ExecStart=/i ExecStartPre=-/usr/bin/sudo -n /usr/local/sbin/reset_bno055_usb.sh' "$unit"
+    fi
 
     sudo systemctl daemon-reload
     sudo systemctl enable roverrobotics.service
@@ -1239,8 +1704,7 @@ EOF9
 
 try_install_package() {
     local package=$1
-    if sudo apt-get install -y "$package" > /dev/null 2>&1; then
-        print_green "$package: Success"
+    if run_with_progress "Installing $package" 45 sudo apt-get install -y "$package"; then
         return 0
     else
         print_red "Error encountered while installing $package."
@@ -1273,6 +1737,20 @@ install_ros_packages() {
 #                          INSTALL PROCESS                              #
 #########################################################################
 
+if [ "$USE_WHIPTAIL" = true ]; then
+    whiptail --backtitle "$WT_BACK" --title "Welcome" --msgbox \
+"This installer sets up the Rover Robotics ROS 2 driver on this computer.
+
+You will choose:
+  1. the robot
+  2. the controller
+  3. what to install: autostart, CAN, IMU, camera, lidar, DDS
+  4. then review everything before anything is installed
+
+Nothing changes until you select Install on the review screen.
+Esc cancels at any point." 18 72
+fi
+
 # Robot type selection (TUI/CLI)
 select_robot_type
 
@@ -1283,6 +1761,18 @@ fi
 
 # applies to every robot
 select_gamepad
+
+# defaults from the detected L4T release
+if [ -n "$ARG_JP6" ]; then
+    use_jp6="$ARG_JP6"
+elif [ "$IS_JP6" = true ]; then
+    ask_yes_no "Detected JetPack 6 (L4T R${L4T_RELEASE}).\nUse the JetPack 6 gamepad button/axis mapping?\n\nSay yes unless your sticks and triggers come out swapped." yes use_jp6
+else
+    # Not a JetPack 6 machine, so the stock map is right. No prompt: --jp6 is
+    # there if a particular kernel turns out to enumerate the pad differently.
+    use_jp6=false
+fi
+
 
 #########################################################################
 #              DETECT EXISTING WORKSPACE / ROVER ROS2 REPO              #
@@ -1319,62 +1809,16 @@ else
     ask_yes_no "Would you like to install the Rover Robotics ros2 repository?" yes install_repo
 fi
 
-# Component selection (IMU / LIDAR / UDEV / SERVICE)
-install_imu=false
-install_s2=false
-install_udev=true
-install_service=false
+is_can_robot=false
+case "$device_type" in
+    miti_65|miti|mini|max|mega) is_can_robot=true ;;
+esac
 
-if [ "$USE_WHIPTAIL" = true ]; then
-    CHOICES=$(
-        whiptail --title "Rover Components" --checklist "Select components to install (Use Spacebar to select and Press Enter to confirm the choices):" 20 70 8 \
-            "IMU"     "BNO055 IMU repository"          OFF \
-            "LIDAR"   "RPLIDAR S2 repository"          OFF \
-            "UDEV"    "Udev rules"                     ON  \
-            "SERVICE" "Automatic start service"        OFF \
-            3>&1 1>&2 2>&3
-    )
+select_components
 
-    install_udev=false
-
-    for choice in $CHOICES; do
-        case $choice in
-            "\"IMU\"")     install_imu=true ;;
-            "\"LIDAR\"")   install_s2=true ;;
-            "\"UDEV\"")    install_udev=true ;;
-            "\"SERVICE\"") install_service=true ;;
-        esac
-    done
-elif [ "$ASSUME_YES" != true ]; then
-    # Fallback to CLI yes/no prompts
-    ask_yes_no "Would you like to install the BNO055 IMU repository?" no install_imu
-    ask_yes_no "Would you like to install the RPLIDAR S2 repository?" no install_s2
-    ask_yes_no "Would you like to install the udev rules?" yes install_udev
-    ask_yes_no "Would you like to install the automatic start service?" no install_service
-fi
-
-# Command-line flags override whatever the menus produced.
-[ -n "$ARG_IMU" ]     && install_imu="$ARG_IMU"
-[ -n "$ARG_LIDAR" ]   && install_s2="$ARG_LIDAR"
-[ -n "$ARG_UDEV" ]    && install_udev="$ARG_UDEV"
-[ -n "$ARG_SERVICE" ] && install_service="$ARG_SERVICE"
-
-# defaults from the detected L4T release
-if [ -n "$ARG_JP6" ]; then
-    use_jp6="$ARG_JP6"
-elif [ "$IS_JP6" = true ]; then
-    ask_yes_no "Detected JetPack 6 (L4T R${L4T_RELEASE}).\nUse the JetPack 6 gamepad button/axis mapping?\n\nSay yes unless your sticks and triggers come out swapped." yes use_jp6
-else
-    # Not a JetPack 6 machine, so the stock map is right. No prompt: --jp6 is
-    # there if a particular kernel turns out to enumerate the pad differently.
-    use_jp6=false
-fi
-
-select_realsense
 
 install_number=0
 install_total=2
-install_can=false
 
 [ "$install_repo" = true ]    && install_total=$((install_total+1))
 [ "$install_service" = true ] && install_total=$((install_total+1))
@@ -1383,26 +1827,43 @@ install_can=false
 [ "$install_s2" = true ]      && install_total=$((install_total+1))
 [ "$install_realsense_opt" = true ] && install_total=$((install_total+1))
 [ "$install_rs_service" = true ]    && install_total=$((install_total+1))
-
-# Offered even when can.service exists, so a re-run can repair a broken setup
-case "$device_type" in
-    miti_65|miti|mini|max|mega)
-        ask_yes_no "Is the Rover $device_type connected via CAN-TO-USB?\n\nThis (re)installs the udev rule, /usr/sbin/enablecan and can.service." yes rover_can
-        if [ "$rover_can" = true ]; then
-            install_can=true
-            install_total=$((install_total+1))
-        fi
-        ;;
-esac
+[ "$install_can" = true ]           && install_total=$((install_total+1))
+[ "$install_cyclone" = true ]       && install_total=$((install_total+1))
+[ "$install_jetpack" = true ]       && install_total=$((install_total+1))
 
 [ "$ASSUME_YES" != true ] && clear
 
-print_install_settings
+confirm_install
+[ "$USE_WHIPTAIL" = true ] || [ "$ASSUME_YES" = true ] && print_install_settings
+
+start_sudo_keepalive
+start_apt_lock_wait
+INSTALL_START=$SECONDS
+est_total=$(( ${#packages[@]} * 30 + 120 ))
+[ "$install_jetpack" = true ]       && est_total=$((est_total + 1500))
+if [ "$install_realsense_opt" = true ]; then
+    rs_total=$(( 2700 * 2 / $(build_jobs) )); [ "$rs_total" -lt 600 ] && rs_total=600
+    est_total=$((est_total + rs_total + 200 + 900))
+fi
+[ "$install_repo" = true ]          && est_total=$((est_total + 300))
+print_bold "Estimated time: about $(( (est_total + 59) / 60 )) minutes. Full output goes to $INSTALL_LOG"
+echo ""
 
 # ROS Packages
 print_next_install "Checking/Installing dependent packages"
 install_ros_packages
 echo ""
+
+if [ "$install_cyclone" = true ]; then
+    print_next_install "Switching ROS 2 to Cyclone DDS"
+    if setup_cyclone; then
+        print_green "Cyclone DDS set in ~/.bashrc, /etc/environment and the services"
+    else
+        print_red "Could not install ros-$ROS_DISTRO-rmw-cyclonedds-cpp; staying on Fast DDS"
+        install_cyclone=false
+    fi
+    echo ""
+fi
 
 if [ "$install_repo" = true ]; then
     print_next_install "Installing the Rover Robotics ROS2 packages"
@@ -1445,7 +1906,9 @@ if [ "$install_imu" = true ]; then
     print_next_install "Installing IMU Repository."
     mkdir -p "$WORKSPACE_DIR/src"
     print_italic "Cloning BNO055 packages into $WORKSPACE_DIR/src"
-    clone_or_update "$IMU_REPO" "" "$WORKSPACE_DIR/src/bno055"
+    [ -d "$WORKSPACE_DIR/src/bno055/.git" ] && \
+        git -C "$WORKSPACE_DIR/src/bno055" remote set-url origin "$IMU_REPO"
+    clone_or_update "$IMU_REPO" "$IMU_BRANCH" "$WORKSPACE_DIR/src/bno055"
 fi
 
 if [ "$install_s2" = true ]; then
@@ -1454,6 +1917,16 @@ if [ "$install_s2" = true ]; then
     mkdir -p "$WORKSPACE_DIR/src"
     print_italic "Cloning RPLIDAR_S2 packages into $WORKSPACE_DIR/src"
     clone_or_update "$RPLIDAR_REPO" "ros2" "$WORKSPACE_DIR/src/rplidar_ros"
+fi
+
+if [ "$install_jetpack" = true ]; then
+    echo ""
+    print_next_install "Installing NVIDIA JetPack and CUDA"
+    if install_jetpack_cuda; then
+        print_green "CUDA available: $(nvcc --version 2>/dev/null | grep -o 'release [0-9.]*')"
+    else
+        print_yellow "CUDA still not found; the camera SDK will be built for the CPU only"
+    fi
 fi
 
 if [ "$install_realsense_opt" = true ]; then
@@ -1473,7 +1946,9 @@ if [ "$install_repo" = true ] || [ "$install_imu" = true ] || [ "$install_s2" = 
     print_italic "Building Rover workspace packages"
     cd "$WORKSPACE_DIR" || exit 1
     source "/opt/ros/$ROS_DISTRO/setup.bash" > /dev/null
-    colcon build
+    build_est=300
+    [ -d "$WORKSPACE_DIR/src/realsense-ros" ] && build_est=1200
+    run_with_progress "Building the workspace with colcon" "$build_est" colcon build
     if [ $? -ne 0 ]; then
         print_red "Failed to build workspace packages"
     else
@@ -1554,6 +2029,13 @@ if [ "$install_service" = true ]; then
     create_startup_service > /dev/null 2>&1
     if [ -f /etc/systemd/system/roverrobotics.service ]; then
         print_green "Succeeded in creating the startup service."
+        if [ "$install_imu" = true ]; then
+            if [ -f /usr/local/sbin/reset_bno055_usb.sh ]; then
+                print_green "Succeeded in adding the IMU serial flush before each driver start"
+            else
+                print_red "Failed creating /usr/local/sbin/reset_bno055_usb.sh"
+            fi
+        fi
     else
         print_red "Failed creating the startup service. File: /etc/systemd/system/roverrobotics.service does not exist."
     fi
@@ -1573,6 +2055,11 @@ if [ "$install_rs_service" = true ]; then
         print_green "Succeeded in creating the RealSense USB reset helper"
     else
         print_red "Failed creating /usr/local/sbin/reset_realsense_usb.sh"
+    fi
+    if systemctl is-enabled --quiet realsense-watchdog.timer 2>/dev/null; then
+        print_green "Succeeded in enabling the camera watchdog (realsense-watchdog.timer)"
+    else
+        print_red "Failed enabling realsense-watchdog.timer"
     fi
     echo ""
 fi
@@ -1670,8 +2157,13 @@ echo "      ros2 topic hz /camera/camera/color/image_raw"
 echo ""
 fi
 if [ "$install_rs_service" = true ]; then
-echo "  The camera starts automatically at boot:"
+echo "  The camera starts automatically at boot, and a watchdog restarts it if frames stop:"
 echo "      systemctl status rover-realsense.service"
+echo "      journalctl -u realsense-watchdog.service"
+echo ""
+fi
+if [ "$install_cyclone" = true ]; then
+echo "  ROS 2 now uses Cyclone DDS. Open a new terminal before running ros2 commands."
 echo ""
 fi
 if [ "$install_service" = true ]; then

@@ -27,7 +27,20 @@ chmod +x *.sh
 
 ## Step 1: Install ROS 2
 
-Skip this if ROS 2 is already installed.
+Optional: `setup_rover.sh` (Step 3) checks for ROS 2 and offers to install it.
+
+| Ubuntu | ROS 2 | Driver branch used |
+|---|---|---|
+| 22.04 | Humble | `humble` |
+| 24.04 | Jazzy | `jazzy` |
+
+If ROS 2 is already installed, the installer uses it and the matching driver
+branch. If both are installed, it uses the one that matches Ubuntu. If none is
+installed, it offers to install the right one by running `ros2_installation.sh`
+(desktop package set). Other Ubuntu releases are not supported.
+
+To install ROS 2 on its own, for example to choose the smaller `base` package
+set:
 
 ```bash
 ./ros2_installation.sh
@@ -91,7 +104,10 @@ module and tell you.
 ./setup_rover.sh
 ```
 
-The installer asks for the following.
+The installer walks you through four steps: robot, controller, components,
+and a review screen. **Nothing is installed until you select Install on the
+review screen**; Esc cancels at any point. If the ROS 2 distro installed on
+the computer is the one the Ubuntu version calls for, it is used without asking.
 
 ### Robot model
 
@@ -104,7 +120,7 @@ config and URDF:
 
 | Wheels | Config | Wheel radius |
 |---|---|---|
-| 13 inch | `max_130_config.yaml` | 0.1651 m |
+| 13 inch | `max_130_config.yaml` | 0.155 m (calibrated effective radius; nominal 0.1651) |
 | 15 inch | `max_150_config.yaml` | 0.1905 m |
 
 The 6.5 inch and 10 inch variants are being phased out and are not offered by
@@ -112,7 +128,9 @@ the installer. Their configs (`max_65_config.yaml`, `max_100_config.yaml`) still
 ship in `roverrobotics_ros2` if you need them. Point `max.launch.py` at one by
 hand.
 
-The installer sets both the config and the URDF in `max.launch.py` to match.
+The installer sets both the config and the URDF in `max.launch.py` to match, and
+points `max_teleop.launch.py` at the same config so the controller speed limits
+in it apply.
 Getting this wrong does not throw an error. It silently scales odometry and
 commanded velocity by the ratio of the two wheel radii.
 
@@ -137,10 +155,24 @@ If your sticks and triggers come out swapped, re-run with the opposite choice:
 
 ### Components
 
-- **Udev rules**: stable `/dev` names for the ESCs, IMU, LIDAR and GPS. On by default.
-- **BNO055 IMU**: clones and builds the IMU driver.
-- **RPLIDAR S2**: clones and builds the LIDAR driver.
-- **Automatic start service**: `roverrobotics.service`, starts the driver at boot. Decline this if you prefer to launch by hand.
+One checklist. Each item sets up everything it needs, including its services
+and watchdogs, and nothing it does not.
+
+| Item | Default | What it sets up |
+|---|---|---|
+| **Start the driver at boot** | off | `roverrobotics.service`, which launches the driver at boot, restarts it if it exits, and stops it gracefully so it brakes the motors |
+| **USB-CAN adapter** (CAN robots only) | on | `rovercan` udev rule, `can.service`, `can-watchdog` (restarts CAN if the link drops) and `can-selftest`; see [CAN interface naming](#can-interface-naming) |
+| **BNO055 IMU** | off | the IMU driver. With the driver starting at boot, also a serial flush before each start (`reset_bno055_usb.sh`), so a desynced IMU port cannot keep the driver in a restart loop |
+| **Intel RealSense** | off | the librealsense SDK and ROS wrapper; see below |
+| **Start the camera at boot** | off | `rover-realsense.service` with a boot delay and a USB reset, and `realsense-watchdog`, which restarts the camera if frames stop. Selects RealSense too |
+| **RPLIDAR S2** | off | the lidar driver |
+| **Udev rules** | on | stable `/dev` names for the ESCs, IMU, lidar and GPS |
+| **Cyclone DDS** | off | switches ROS 2 from Fast DDS to Cyclone DDS in `~/.bashrc`, `/etc/environment` and the services. Recommended on JetPack 6, where Fast DDS has been seen to stop delivering messages shortly after start |
+
+The BNO055 driver comes from `ssharma0704/bno055` branch `fix-startup-race`:
+upstream `flynneva/bno055` plus a retry of the serial connect and sensor setup,
+submitted upstream as flynneva/bno055 pull request 85. Upstream can exit at boot
+before the IMU's serial port appears.
 
 Installing a sensor driver does not switch it on by itself: set `active: true`
 for that sensor in `roverrobotics_driver/config/accessories.yaml`, since
@@ -148,31 +180,92 @@ for that sensor in `roverrobotics_driver/config/accessories.yaml`, since
 
 ### Intel RealSense (optional)
 
-Asked separately, because how it installs depends on the computer:
+How it installs depends on the computer:
 
 | Platform | librealsense SDK | ROS wrapper |
 |---|---|---|
 | Intel/AMD x86, Raspberry Pi | prebuilt packages (`ros-$ROS_DISTRO-librealsense2`, falling back to Intel's apt repo), quick | `ros-$ROS_DISTRO-realsense2-camera` from apt |
-| NVIDIA Jetson | built from source with CUDA when available, **~45 minutes** | `realsense-ros` built in your workspace |
+| NVIDIA Jetson | built from source with CUDA when available; the longest step (see *Build speed* below) | `realsense-ros` built in your workspace |
 
-Intel publishes no arm64 debs, which is why a Jetson has to build the SDK. The
-installer detects the platform and picks the right path; you are only asked
-whether you want RealSense at all.
+Intel publishes no arm64 debs, which is why a Jetson has to build the SDK.
 
 **Unplug the camera before the Jetson SDK build.** The installer says so and
 waits. Plug it back in afterwards.
 
-You are then asked whether to install **`rover-realsense.service`**, which
-starts the camera at boot. It runs `reset_realsense_usb.sh` before every start,
-power-cycling the camera over USB. The D435i is prone to enumeration failures
-that a plain restart does not clear. The reset needs a `NOPASSWD` sudoers
-entry, which the installer writes to `/etc/sudoers.d/rover-realsense`, scoped to
-that one script.
+**Build speed.** Intel's build script compiles two files at a time. The
+installer raises that to one job per CPU core, capped at one job per 2 GB of
+RAM so a small Jetson does not run out of memory, and never below two. It prints
+the number it chose, for example `building with 14 parallel jobs (14 cores,
+122 GB RAM)`:
+
+| Jetson | Jobs |
+|---|---|
+| AGX Thor (14 cores, 128 GB) | 14 |
+| AGX Orin 64 GB (12 cores) | 12 |
+| AGX Orin 32 GB / Orin NX 16 GB (8 cores) | 8 / 7 |
+| Orin Nano 8 GB (6 cores) | 3 |
+| 4 GB modules, or memory unreadable | 2 (Intel's default) |
+
+With Intel's two jobs the SDK build took about 14 minutes on an AGX Thor and
+about 45 minutes on older Jetsons.
+
+**JetPack and CUDA on a Jetson.** If you choose RealSense on a Jetson that has no
+CUDA, the installer asks whether to install NVIDIA JetPack and CUDA first
+(`nvidia-jetpack` from the L4T apt source, then `nvidia-cuda-dev` if `nvcc` is
+still missing, and the CUDA paths in `~/.bashrc`). With CUDA the SDK processes
+camera images on the GPU; without it the build still works, for the CPU only.
+The question is not asked when CUDA is already installed or the computer is not
+a Jetson. For unattended installs use `--with-jetpack`; `--no-jetpack` never
+installs it.
+
+**Start the camera at boot** runs `reset_realsense_usb.sh` before every start,
+power-cycling the camera over USB, after waiting 20 s at boot for USB to
+enumerate it: a camera that is missing when the node starts is otherwise never
+picked up. `realsense-watchdog.timer` checks every 20 s that frames are
+arriving and restarts the camera if they are not. The resets need a `NOPASSWD`
+sudoers entry, written to `/etc/sudoers.d/rover-realsense` and scoped to that
+one script.
+
+### While it installs
+
+After you select Install the installer asks for your sudo password once and
+keeps it valid until it finishes, so it never stops halfway for a password.
+
+Each long step shows one live line instead of scrolling output:
+
+```
+[4/9]: Installing NVIDIA JetPack and CUDA   (12:41 elapsed)
+  / Installing nvidia-jetpack  [########............]  43%  8:36 elapsed, about 11:24 left
+```
+
+- The **spinner** turns several times a second while the step runs. If it stops
+  turning, the installer itself has stopped.
+- The **bar and the time left** compare the elapsed time with how long that step
+  usually takes. A step running past its usual time stays at 99% and says
+  `taking longer than usual` rather than looking stuck.
+- A finished step leaves `done: <step> (m:ss)`. A failed step prints
+  `FAILED: <step>` in red, followed by the last 15 lines that step produced.
+- The full output of every step is written to **`~/rover_setup.log`**.
+- `[n/total]` counts the main steps, with the total time so far. The installer
+  also prints an estimate of the whole install once you select Install.
+
+**Waiting for apt.** Only one program can install packages at a time. Ubuntu's
+automatic updates, and on JetPack 7 NVIDIA's own Docker setup after
+`nvidia-jetpack`, can be installing at the same moment, and apt normally fails at
+once with `Could not get lock`. For the length of the install the installer adds
+`/etc/apt/apt.conf.d/90rover-installer-lock-wait`, so every apt command, including
+the ones inside Intel's RealSense script, waits up to 10 minutes instead. The
+file is removed when the installer exits, whether it finished, failed or was
+cancelled.
+
+Run without a terminal (for example `-y` with the output redirected to a file),
+the installer prints a plain line when each step starts and ends instead of the
+live line.
 
 ### CAN setup
 
-Offered for every CAN-connected model (Mini, Miti, Miti 65, Max, Mega). See
-[CAN interface naming](#can-interface-naming) below.
+Offered for every CAN-connected model (Mini, Miti, Miti 65, Max, Mega), and
+ticked by default. See [CAN interface naming](#can-interface-naming) below.
 
 <details>
 <summary>Non-interactive options</summary>
@@ -182,13 +275,19 @@ Offered for every CAN-connected model (Mini, Miti, Miti 65, Max, Mega). See
 -w, --max-wheel IN   MAX wheel size in inches: 13 | 15
 -g, --gamepad PAD    ps4 | ps5
 -d, --distro NAME    ROS 2 distro (humble, jazzy)
-    --with-imu       Install the BNO055 IMU repository
-    --with-lidar     Install the RPLIDAR S2 repository
-    --with-realsense Install Intel RealSense support (SDK + ROS wrapper)
+    --with-service   Start the driver at boot
+    --with-can       Set up the USB-CAN adapter (CAN robots; default yes)
+    --no-can         Skip the CAN setup
+    --with-imu       BNO055 IMU (serial flush before each start with --with-service)
+    --with-lidar     RPLIDAR S2 driver
+    --with-realsense Intel RealSense SDK and ROS wrapper
     --no-realsense   Skip RealSense without being asked
-    --with-rs-service  Install rover-realsense.service (implies --with-realsense)
-    --with-service   Install the roverrobotics.service autostart unit
+    --with-rs-service  Start the camera at boot, with watchdog (implies --with-realsense)
+    --with-cyclone   Use Cyclone DDS (default: Fast DDS)
+    --with-jetpack   Jetson + RealSense: install JetPack and CUDA if CUDA is missing
+    --no-jetpack     Never install JetPack/CUDA
     --no-udev        Skip the udev rules
+    --install-ros    Install the matching ROS 2 if it is missing (runs ros2_installation.sh)
     --jp6            Force the JetPack 6 gamepad mapping
     --no-jp6         Force the stock gamepad mapping
 -y, --yes            Non-interactive
@@ -198,6 +297,7 @@ Offered for every CAN-connected model (Mini, Miti, Miti 65, Max, Mega). See
 ```bash
 ./setup_rover.sh --robot miti --gamepad ps5 --with-service -y
 ./setup_rover.sh -r max -w 13 -g ps5 --with-imu -y
+./setup_rover.sh -r miti -g ps5 --with-service --with-imu --with-rs-service --with-cyclone -y
 ```
 
 `--yes` requires `--robot`, and `--robot max` also requires `--max-wheel`.
@@ -242,6 +342,7 @@ which mode it settled on.
 | Path | Purpose | Installed by |
 |---|---|---|
 | `~/rover_workspace/` | ROS 2 workspace and source repos | `setup_rover.sh` |
+| `~/rover_setup.log` | Full output of every install step | `setup_rover.sh` |
 | `/etc/udev/rules.d/55-roverrobotics.rules` | Stable `/dev` names for ESCs, IMU, LIDAR, GPS | `setup_rover.sh` |
 | `/etc/udev/rules.d/99-can-usb.rules` | Renames the USB-CAN adapter to `rovercan` | both |
 | `/etc/modules-load.d/gs_usb.conf` | Loads `gs_usb` at boot (Jetson only) | both |
@@ -252,6 +353,9 @@ which mode it settled on.
 | `/usr/local/sbin/reset_realsense_usb.sh` | Power-cycles the camera over USB before each start | `setup_rover.sh` (RealSense service) |
 | `/etc/sudoers.d/rover-realsense` | NOPASSWD for that one reset script | `setup_rover.sh` (RealSense service) |
 | `/etc/systemd/system/rover-realsense.service` | Starts the camera node at boot | `setup_rover.sh` (RealSense service) |
+| `/usr/sbin/realsense-watchdog` + `.service` + `.timer`, `/usr/local/sbin/realsense-probe` | Restarts the camera if frames stop | `setup_rover.sh` (RealSense service) |
+| `/usr/local/sbin/reset_bno055_usb.sh`, `/etc/sudoers.d/rover-bno055` | Flushes the IMU serial port before each driver start | `setup_rover.sh` (IMU + driver at boot) |
+| `/etc/environment`, `~/.bashrc` | `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` | `setup_rover.sh` (Cyclone DDS) |
 | `/usr/sbin/roverrobotics` | Sources ROS and the workspace, launches the driver | `setup_rover.sh` |
 | `/etc/systemd/system/roverrobotics.service` | Starts the driver at boot | `setup_rover.sh` |
 
@@ -336,6 +440,8 @@ journalctl -u roverrobotics.service -f
 | Wheels coast for about a second after the driver crashes | A hard crash or `kill -9` cannot send the brake; the VESCs hold the last command until their own timeout, then release | In VESC Tool, set a *Timeout Brake Current* on each VESC so it brakes instead of coasting when commands stop |
 | `UnicodeDecodeError` from colcon or rosdep | Non-UTF-8 locale | Re-run `./ros2_installation.sh`, which configures the locale |
 | `apt update` signature error | Stale ROS keyring | `./ros2_installation.sh --refresh-keys` |
+| A step shows `FAILED` | See the lines printed under it | The whole output of that step is in `~/rover_setup.log` |
+| A step sits at 99%, `taking longer than usual` | Slow download or a slower computer, not a hang while the spinner turns | Wait; check `tail -f ~/rover_setup.log` in a second terminal to watch it |
 | udev `/dev` symlinks missing | `setserial` not installed | Re-run `./setup_rover.sh`; it is in the package list |
 | Camera node starts then dies repeatedly | D435i USB enumeration failure | `rover-realsense.service` power-cycles it each start; check `journalctl -u rover-realsense` |
 | `librealsense2` has no install candidate | Intel publishes no build for this Ubuntu release | Build from source, or use a release Intel supports |
@@ -368,12 +474,38 @@ cd ~/rover_workspace && colcon build
 
 ## Uninstall
 
-Removes the services, udev rules and helper scripts. It does **not** delete
-`~/rover_workspace`.
-
 ```bash
 ./uninstall_rover_script.sh
 ```
+
+With no options it removes everything `setup_rover.sh` set up on the system:
+every service and watchdog (driver, CAN, camera), the helper scripts, the
+sudoers entries, the udev rules, the `gs_usb` module config, the Cyclone DDS
+setting, the install log and the workspace line in `~/.bashrc`. It keeps your
+workspace, ROS 2 and the NVIDIA software.
+
+To remove more, add any of these. Each one asks before it removes anything,
+unless you add `-y`:
+
+| Option | Also removes |
+|---|---|
+| `--workspace` | `~/rover_workspace` (source, build and install) |
+| `--realsense` | the librealsense SDK: on a Jetson the files built into `/usr/local`, its udev rules and build files; on x86 the prebuilt packages and Intel's apt source |
+| `--ros` | ROS 2: every `ros-<distro>-*` package, colcon and rosdep, the ROS apt source and keyring, and the ROS lines in `~/.bashrc` |
+| `--jetpack` | NVIDIA JetPack and CUDA (`nvidia-jetpack` and everything it brought in) and the CUDA lines in `~/.bashrc`. The L4T packages the Jetson boots from are never removed |
+| `--docker` | Docker, which JetPack 7 installs, and its apt source |
+| `--all` | all of the above: the computer as it was before `ros2_installation.sh` and `setup_rover.sh` |
+
+```bash
+./uninstall_rover_script.sh --workspace --realsense   # start the rover setup over, keep ROS and CUDA
+./uninstall_rover_script.sh --all                     # back to a bare computer
+```
+
+Reboot afterwards. Packages the installer added that other software may also use,
+such as build tools and system libraries, are left in place; only packages that
+nothing needs any more are removed (`apt-get autoremove`). When it removes
+packages it also clears their leftover configuration and the apt download cache,
+which holds several GB after JetPack and ROS.
 
 ---
 
