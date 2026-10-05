@@ -184,7 +184,15 @@ Options:
       --with-rs-service  Start the camera at boot: rover-realsense.service,
                        USB reset, boot delay and a frame watchdog
                        (implies --with-realsense)
-      --with-cyclone   Use Cyclone DDS for ROS 2 (default: Fast DDS)
+      --with-cyclone   Use Cyclone DDS for ROS 2 (default: Fast DDS), set up so the
+                       robot keeps working when it loses the network: traffic on
+                       the robot goes over loopback, WiFi/Ethernet are optional
+      --domain-id N    ROS_DOMAIN_ID (0-101) for this computer: ~/.bashrc,
+                       /etc/environment and every service. Default: keep the
+                       one already in ~/.bashrc
+      --with-gps       u-blox GPS (ZED-F9P) driver and rover-ublox.service with
+                       a data watchdog (Jazzy only). Switched on or off with
+                       'active' under ublox_gps_node in accessories.yaml
       --with-jetpack   Jetson + RealSense: install JetPack and CUDA first if
                        CUDA is missing, so the camera SDK builds with CUDA
       --no-jetpack     Never offer JetPack/CUDA
@@ -200,6 +208,7 @@ Examples:
   ./setup_rover.sh --robot miti --gamepad ps5 --with-service -y
   ./setup_rover.sh -r max -w 13 -g ps5 -d humble --with-imu -y
   ./setup_rover.sh -r miti -g ps5 --with-service --with-imu --with-rs-service --with-cyclone -y
+  ./setup_rover.sh -r max -w 13 -g ps5 --with-service --with-gps --domain-id 29 -y
 EOF_USAGE
 }
 
@@ -218,6 +227,8 @@ ARG_CAN=""
 ARG_CYCLONE=""
 ARG_INSTALL_ROS=""
 ARG_JETPACK=""
+ARG_GPS=""
+ARG_DOMAIN=""
 ASSUME_YES=false
 
 while [ $# -gt 0 ]; do
@@ -239,6 +250,8 @@ while [ $# -gt 0 ]; do
         --with-jetpack) ARG_JETPACK=true; shift ;;
         --no-jetpack)  ARG_JETPACK=false; shift ;;
         --no-cyclone)  ARG_CYCLONE=false; shift ;;
+        --with-gps)    ARG_GPS=true; shift ;;
+        --domain-id)   ARG_DOMAIN="${2:-}"; shift 2 ;;
         --no-udev)     ARG_UDEV=false; shift ;;
         --jp6)         ARG_JP6=true; shift ;;
         --no-jp6)      ARG_JP6=false; shift ;;
@@ -247,6 +260,12 @@ while [ $# -gt 0 ]; do
         *) print_red "Unknown option: $1"; echo ""; usage; exit 1 ;;
     esac
 done
+
+valid_domain_id() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -le 101 ]; }
+if [ -n "$ARG_DOMAIN" ] && ! valid_domain_id "$ARG_DOMAIN"; then
+    print_red "--domain-id must be a number from 0 to 101 (got '$ARG_DOMAIN')"
+    exit 1
+fi
 
 #########################################################################
 #                    DETECT UBUNTU & SUGGEST ROS2 DISTRO                #
@@ -410,7 +429,7 @@ install_summary() {
     echo "Platform:          $PLATFORM_DESC"
     echo "Robot:             $device_type${max_variant:+ ($max_variant)}"
     echo "Controller:        $pad"
-    echo "ROS 2:             $ROS_DISTRO, $dds"
+    echo "ROS 2:             $ROS_DISTRO, $dds${ros_domain_id:+, ROS_DOMAIN_ID $ros_domain_id}"
     echo "Workspace:         $WORKSPACE_DIR"
     echo "Driver repository: $(yes_no "$install_repo")"
     echo "Driver at boot:    $(yes_no "$install_service")"
@@ -421,6 +440,7 @@ install_summary() {
     [ "$install_jetpack" = true ] && \
     echo "JetPack + CUDA:    yes, installed before the camera SDK"
     echo "RPLidar S2:        $(yes_no "$install_s2")"
+    echo "u-blox GPS:        $(yes_no "$install_gps")"
     echo "Udev rules:        $(yes_no "$install_udev")"
 }
 
@@ -671,6 +691,7 @@ select_components() {
     install_s2=false
     install_udev=true
     install_cyclone=false
+    install_gps=false
 
     if [ "$ASSUME_YES" = true ]; then
         :
@@ -681,9 +702,11 @@ select_components() {
         items+=("IMU"        "BNO055 IMU (serial flush before each driver start)" OFF
                 "REALSENSE"  "Intel RealSense SDK + ROS wrapper (~45 min on Jetson)" OFF
                 "RS_SERVICE" "Start the camera at boot, with USB reset and watchdog" OFF
-                "LIDAR"      "RPLIDAR S2 driver" OFF
-                "UDEV"       "Udev rules for sensors and serial rovers" ON
-                "CYCLONE"    "Cyclone DDS instead of the default Fast DDS" OFF)
+                "LIDAR"      "RPLIDAR S2 driver" OFF)
+        [ "$ROS_DISTRO" = jazzy ] && \
+            items+=("GPS" "u-blox GPS driver + service; switch on in accessories.yaml" OFF)
+        items+=("UDEV"       "Udev rules for sensors and serial rovers" ON
+                "CYCLONE"    "Cyclone DDS; robot keeps working when it loses the network" OFF)
         local choices
         choices=$(whiptail --backtitle "$WT_BACK" --title "Step 3 of 4 · Components" --checklist \
             "Choose what to set up. Space selects, Enter confirms.\nEach item installs its own services and watchdogs." \
@@ -699,6 +722,7 @@ select_components() {
                 REALSENSE)  install_realsense_opt=true ;;
                 RS_SERVICE) install_rs_service=true ;;
                 LIDAR)      install_s2=true ;;
+                GPS)        install_gps=true ;;
                 UDEV)       install_udev=true ;;
                 CYCLONE)    install_cyclone=true ;;
             esac
@@ -712,8 +736,10 @@ select_components() {
         [ "$install_realsense_opt" = true ] && \
             ask_yes_no "Start the camera at boot, with USB reset and a frame watchdog?" yes install_rs_service
         ask_yes_no "Install the RPLIDAR S2 driver?" no install_s2
+        [ "$ROS_DISTRO" = jazzy ] && \
+            ask_yes_no "Install the u-blox GPS driver and service? It stays off until you set\nactive: true under ublox_gps_node in accessories.yaml." no install_gps
         ask_yes_no "Install the udev rules?" yes install_udev
-        ask_yes_no "Use Cyclone DDS instead of the default Fast DDS?" no install_cyclone
+        ask_yes_no "Use Cyclone DDS instead of the default Fast DDS?\nIt is set up so the robot keeps working when it loses the network." no install_cyclone
     fi
 
     # command-line flags win over the menu
@@ -725,6 +751,12 @@ select_components() {
     [ -n "$ARG_LIDAR" ]      && install_s2="$ARG_LIDAR"
     [ -n "$ARG_UDEV" ]       && install_udev="$ARG_UDEV"
     [ -n "$ARG_CYCLONE" ]    && install_cyclone="$ARG_CYCLONE"
+    [ -n "$ARG_GPS" ]        && install_gps="$ARG_GPS"
+
+    if [ "$install_gps" = true ] && [ "$ROS_DISTRO" != jazzy ]; then
+        print_yellow "GPS support is available on the Jazzy branch only; skipping it on $ROS_DISTRO."
+        install_gps=false
+    fi
 
     [ "$is_can_robot" = true ] || install_can=false
     [ "$install_rs_service" = true ] && install_realsense_opt=true
@@ -964,9 +996,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF_RSSVC
 
-    [ "$install_cyclone" = true ] && \
-        sudo sed -i '/^Environment=HOME=/a Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' \
-            /etc/systemd/system/rover-realsense.service
+    add_ros_env /etc/systemd/system/rover-realsense.service
 
     create_realsense_watchdog
 
@@ -1027,7 +1057,7 @@ now=$(awk '{printf "%d", $1 * 1000000}' /proc/uptime)
 export HOME=RUN_HOME_PLACEHOLDER
 # probe with the unit's own ROS env
 for kv in $(systemctl show "$UNIT" -p Environment --value); do
-    case "$kv" in ROS_*|RMW_*) export "$kv" ;; esac
+    case "$kv" in ROS_*|RMW_*|CYCLONEDDS_*) export "$kv" ;; esac
 done
 source /opt/ros/ROS_DISTRO_PLACEHOLDER/setup.bash >/dev/null 2>&1
 source WORKSPACE_PLACEHOLDER/install/setup.bash   >/dev/null 2>&1
@@ -1127,13 +1157,322 @@ EOF_IMURESET
     fi
 }
 
+# ROS_DOMAIN_ID: the flag, else the one already in ~/.bashrc, else ask (empty = ROS default 0)
+select_domain_id() {
+    local existing
+    existing=$(grep -oE '^export ROS_DOMAIN_ID=[0-9]+' ~/.bashrc 2>/dev/null | tail -1 | cut -d= -f2)
+    ros_domain_id="$existing"
+    if [ -n "$ARG_DOMAIN" ]; then
+        ros_domain_id="$ARG_DOMAIN"
+        return
+    fi
+    [ "$ASSUME_YES" = true ] && return
+    local answer
+    while true; do
+        if [ "$USE_WHIPTAIL" = true ]; then
+            answer=$(whiptail --backtitle "$WT_BACK" --title "ROS_DOMAIN_ID" --inputbox \
+"ROS_DOMAIN_ID keeps this robot's ROS traffic apart from other robots on the
+same network. Use a different number (0-101) for each robot.
+
+Leave empty for the ROS default (0)." 13 72 "$existing" 3>&1 1>&2 2>&3) \
+                || { echo "Cancelled. Nothing was changed."; exit 0; }
+        else
+            read -p "ROS_DOMAIN_ID for this robot, 0-101 (empty = ROS default)${existing:+ [$existing]}: " answer
+            answer=${answer:-$existing}
+        fi
+        if [ -z "$answer" ] || valid_domain_id "$answer"; then
+            ros_domain_id="$answer"
+            return
+        fi
+        [ "$USE_WHIPTAIL" = true ] || echo "Please enter a number from 0 to 101, or leave it empty."
+    done
+}
+
+setup_domain_id() {
+    # replace, so a re-run never leaves two different values behind
+    sed -i '/^export ROS_DOMAIN_ID=/d' ~/.bashrc
+    echo "export ROS_DOMAIN_ID=$ros_domain_id" >> ~/.bashrc
+    sudo sed -i '/^ROS_DOMAIN_ID=/d' /etc/environment
+    echo "ROS_DOMAIN_ID=$ros_domain_id" | sudo tee -a /etc/environment >/dev/null
+    ros2 daemon stop >/dev/null 2>&1
+    return 0
+}
+
+# Same DDS and domain in every service, or their nodes cannot see each other
+add_ros_env() {
+    local unit="$1"
+    if [ "$install_cyclone" = true ]; then
+        sudo sed -i "/^Environment=HOME=/a Environment=CYCLONEDDS_URI=file://$CYCLONE_XML" "$unit"
+        sudo sed -i '/^Environment=HOME=/a Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' "$unit"
+    fi
+    [ -n "$ros_domain_id" ] && \
+        sudo sed -i "/^Environment=HOME=/a Environment=ROS_DOMAIN_ID=$ros_domain_id" "$unit"
+    return 0
+}
+
+install_gps_driver() {
+    try_install_package "ros-$ROS_DISTRO-ublox-gps" || return 1
+    # settings live in accessories.yaml; hold the driver so an upgrade cannot change how it reads them
+    sudo apt-mark hold "ros-$ROS_DISTRO-ublox-gps" >/dev/null
+    return 0
+}
+
+create_gps_service() {
+    local accessories="$WORKSPACE_DIR/install/roverrobotics_driver/share/roverrobotics_driver/config/accessories.yaml"
+
+    # ExecCondition: exit 0 runs the GPS, 1 skips the service without a failure or a restart
+    sudo tee /usr/local/sbin/rover-gps-active >/dev/null <<EOF_GPSACTIVE
+#!/usr/bin/env python3
+# Exit 0 if ublox_gps_node is set active in the installed accessories.yaml, else 1.
+import sys
+import yaml
+try:
+    with open('$accessories') as f:
+        cfg = yaml.safe_load(f) or {}
+except OSError:
+    sys.exit(1)
+gps = (cfg.get('ublox_gps_node') or {}).get('ros__parameters') or {}
+if gps.get('active', False) is True:
+    sys.exit(0)
+print('rover-ublox: GPS is off (active: false under ublox_gps_node in accessories.yaml)')
+sys.exit(1)
+EOF_GPSACTIVE
+    sudo chmod +x /usr/local/sbin/rover-gps-active
+
+    sudo tee /usr/local/sbin/reset_ublox_usb.sh >/dev/null <<'EOF_GPSRESET'
+#!/bin/bash
+# Power-cycle the u-blox receiver over USB before the driver starts, so a wedged
+# receiver gets a clean start. Always exits 0: no receiver must not stop the service.
+for dev in /sys/bus/usb/devices/*; do
+  [ "$(cat "$dev/idVendor" 2>/dev/null)" = "1546" ] || continue
+  if [ -w "$dev/authorized" ]; then
+    echo 0 > "$dev/authorized"
+    sleep 1
+    echo 1 > "$dev/authorized"
+    echo "reset_ublox_usb: power-cycled $(basename "$dev")"
+  fi
+done
+exit 0
+EOF_GPSRESET
+    sudo chmod +x /usr/local/sbin/reset_ublox_usb.sh
+
+    echo "$USER ALL=(root) NOPASSWD: /usr/local/sbin/reset_ublox_usb.sh" \
+        | sudo tee /etc/sudoers.d/rover-ublox >/dev/null
+    sudo chmod 0440 /etc/sudoers.d/rover-ublox
+    if ! sudo visudo -cf /etc/sudoers.d/rover-ublox >/dev/null 2>&1; then
+        sudo rm -f /etc/sudoers.d/rover-ublox
+        print_yellow "  sudoers drop-in failed validation and was removed;"
+        print_yellow "  the service will not be able to reset the GPS over USB."
+    fi
+
+    sudo tee /etc/systemd/system/rover-ublox.service >/dev/null <<EOF_GPSSVC
+[Unit]
+Description=u-blox GPS ROS 2 node
+Wants=network-online.target
+After=network-online.target
+# never give up: a GPS can be unplugged for hours and plugged back in
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=$USER
+Environment=HOME=$HOME
+WorkingDirectory=$HOME
+ExecCondition=/usr/local/sbin/rover-gps-active
+ExecStartPre=-/usr/bin/sudo -n /usr/local/sbin/reset_ublox_usb.sh
+# the receiver may enumerate late at boot or after the reset
+ExecStartPre=/bin/bash -c 'for i in \$(seq 30); do [ -e /dev/ublox-gps ] && exit 0; sleep 1; done; echo "rover-ublox: /dev/ublox-gps not found"; exit 1'
+ExecStart=/bin/bash -c 'source /opt/ros/$ROS_DISTRO/setup.bash && source $WORKSPACE_DIR/install/setup.bash && exec ros2 launch roverrobotics_driver gps.launch.py'
+Restart=always
+# back off from 3 s to one try a minute while the receiver is missing
+RestartSec=3
+RestartSteps=5
+RestartMaxDelaySec=60
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
+EOF_GPSSVC
+    add_ros_env /etc/systemd/system/rover-ublox.service
+
+    # start the GPS as soon as the receiver is plugged in
+    sudo tee /etc/udev/rules.d/56-rover-ublox.rules >/dev/null <<'EOF_GPSUDEV'
+# Start rover-ublox.service when the u-blox receiver appears (installed by setup_rover.sh --with-gps)
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a9", TAG+="systemd", ENV{SYSTEMD_WANTS}+="rover-ublox.service"
+EOF_GPSUDEV
+    sudo udevadm control --reload-rules >/dev/null 2>&1
+
+    create_gps_watchdog
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable rover-ublox.service
+    sudo systemctl enable --now gps-watchdog.timer
+}
+
+# The driver can stay up while publishing nothing, which systemd cannot see; judge /fix.
+create_gps_watchdog() {
+    sudo tee /usr/local/sbin/gps-probe >/dev/null <<'EOF_GPSPROBE'
+#!/usr/bin/env python3
+# Exit 0 if a message arrives on the topic within the timeout, else 1. Any fix status
+# counts: no satellite fix is not a fault a restart can cure.
+import sys, time
+import rclpy
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import NavSatFix
+
+topic   = sys.argv[1] if len(sys.argv) > 1 else '/fix'
+timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 8.0
+
+rclpy.init(args=None)
+node = rclpy.create_node('gps_probe')
+seen = []
+node.create_subscription(NavSatFix, topic, lambda _m: seen.append(1), qos_profile_sensor_data)
+
+deadline = time.monotonic() + timeout
+while rclpy.ok() and not seen and time.monotonic() < deadline:
+    rclpy.spin_once(node, timeout_sec=0.2)
+
+node.destroy_node()
+rclpy.shutdown()
+sys.exit(0 if seen else 1)
+EOF_GPSPROBE
+    sudo chmod +x /usr/local/sbin/gps-probe
+
+    sudo tee /usr/sbin/gps-watchdog >/dev/null <<'EOF_GPSWD'
+#!/bin/bash
+# Restart rover-ublox.service when the GPS driver runs but /fix has gone silent.
+TOPIC=/fix
+UNIT=rover-ublox.service
+PROBE=/usr/local/sbin/gps-probe
+SETTLE=20
+WAIT=8
+
+# GPS switched off, stopped on purpose, or still starting: nothing to do
+systemctl is-active --quiet "$UNIT" || exit 0
+since=$(systemctl show "$UNIT" -p ActiveEnterTimestampMonotonic --value)
+now=$(awk '{printf "%d", $1 * 1000000}' /proc/uptime)
+[ -n "$since" ] && [ "$since" -gt 0 ] || exit 0
+[ $(( (now - since) / 1000000 )) -ge "$SETTLE" ] || exit 0
+
+export HOME=RUN_HOME_PLACEHOLDER
+# probe with the unit's own ROS env
+for kv in $(systemctl show "$UNIT" -p Environment --value); do
+    case "$kv" in ROS_*|RMW_*|CYCLONEDDS_*) export "$kv" ;; esac
+done
+source /opt/ros/ROS_DISTRO_PLACEHOLDER/setup.bash >/dev/null 2>&1
+source WORKSPACE_PLACEHOLDER/install/setup.bash   >/dev/null 2>&1
+
+"$PROBE" "$TOPIC" "$WAIT" && exit 0
+sleep 3
+"$PROBE" "$TOPIC" "$WAIT" && exit 0
+
+echo "gps-watchdog: no message on $TOPIC across two ${WAIT}s probes; restarting $UNIT"
+systemctl restart "$UNIT"
+EOF_GPSWD
+    sudo sed -i "s|RUN_HOME_PLACEHOLDER|$HOME|; s|ROS_DISTRO_PLACEHOLDER|$ROS_DISTRO|; s|WORKSPACE_PLACEHOLDER|$WORKSPACE_DIR|" \
+        /usr/sbin/gps-watchdog
+    sudo chmod +x /usr/sbin/gps-watchdog
+
+    sudo tee /etc/systemd/system/gps-watchdog.service >/dev/null <<'EOF_GPSWDSVC'
+[Unit]
+Description=Restart rover-ublox.service if the GPS has stopped publishing
+After=rover-ublox.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120
+ExecStart=/usr/sbin/gps-watchdog
+EOF_GPSWDSVC
+
+    sudo tee /etc/systemd/system/gps-watchdog.timer >/dev/null <<'EOF_GPSWDTMR'
+[Unit]
+Description=Periodically verify the GPS is publishing
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+AccuracySec=1
+Unit=gps-watchdog.service
+
+[Install]
+WantedBy=timers.target
+EOF_GPSWDTMR
+}
+
+CYCLONE_XML=/etc/cyclonedds/rover.xml
+
+# The robot's real network ports: WiFi and Ethernet with a device behind them, not
+# bridges, Docker, CAN or the Jetson's USB gadget ports (usb0/usb1)
+network_interfaces() {
+    local d n drv
+    for d in /sys/class/net/*; do
+        n=$(basename "$d")
+        [ "$(cat "$d/type" 2>/dev/null)" = 1 ] || continue
+        [ -e "$d/device" ] || continue
+        drv=$(basename "$(readlink "$d/device/driver" 2>/dev/null)" 2>/dev/null)
+        case "$drv" in configfs-gadget*|g_ether) continue ;; esac
+        echo "$n"
+    done
+}
+
+# Same-computer ROS traffic goes over loopback, which never goes away, so the pad and the
+# driver keep talking when the robot leaves the network. WiFi and Ethernet are optional extras
+# for laptops on the network: used when present, never required. Without this Cyclone binds
+# everything to the WiFi address and all ROS traffic stops the moment WiFi drops.
+write_cyclone_config() {
+    local n
+    sudo mkdir -p "$(dirname "$CYCLONE_XML")"
+    {
+        echo '<?xml version="1.0" encoding="UTF-8" ?>'
+        echo '<!-- written by setup_rover.sh; re-run it after adding a network port -->'
+        echo '<CycloneDDS xmlns="https://cdds.io/config">'
+        echo '  <Domain Id="any">'
+        echo '    <General>'
+        echo '      <Interfaces>'
+        echo '        <NetworkInterface name="lo" multicast="true"/>'
+        for n in $(network_interfaces); do
+            echo "        <NetworkInterface name=\"$n\" presence_required=\"false\"/>"
+        done
+        echo '      </Interfaces>'
+        echo '    </General>'
+        echo '  </Domain>'
+        echo '</CycloneDDS>'
+    } | sudo tee "$CYCLONE_XML" >/dev/null
+
+    # Linux leaves multicast off on loopback; Cyclone discovery on lo needs it, at every boot
+    sudo tee /etc/systemd/system/lo-multicast.service >/dev/null <<'EOF_LOMC'
+[Unit]
+Description=Enable multicast on loopback for ROS 2 (Cyclone DDS)
+DefaultDependencies=no
+Before=network-pre.target roverrobotics.service rover-realsense.service rover-ublox.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ip link set lo multicast on
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF_LOMC
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now lo-multicast.service >/dev/null 2>&1
+}
+
 setup_cyclone() {
     try_install_package "ros-$ROS_DISTRO-rmw-cyclonedds-cpp" || return 1
+    write_cyclone_config
     # every login shell and every service must agree, or nodes do not see each other
     grep -Fqx "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" ~/.bashrc 2>/dev/null ||
         echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" >> ~/.bashrc
+    grep -Fqx "export CYCLONEDDS_URI=file://$CYCLONE_XML" ~/.bashrc 2>/dev/null ||
+        echo "export CYCLONEDDS_URI=file://$CYCLONE_XML" >> ~/.bashrc
     grep -q "^RMW_IMPLEMENTATION=" /etc/environment 2>/dev/null ||
         echo "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" | sudo tee -a /etc/environment >/dev/null
+    grep -q "^CYCLONEDDS_URI=" /etc/environment 2>/dev/null ||
+        echo "CYCLONEDDS_URI=file://$CYCLONE_XML" | sudo tee -a /etc/environment >/dev/null
     ros2 daemon stop >/dev/null 2>&1
     return 0
 }
@@ -1369,8 +1708,7 @@ WantedBy=multi-user.target
 EOF3
 
     local unit=/etc/systemd/system/roverrobotics.service
-    [ "$install_cyclone" = true ] && \
-        sudo sed -i '/^Environment=HOME=/a Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' "$unit"
+    add_ros_env "$unit"
     if [ "$install_imu" = true ]; then
         create_bno055_reset
         # leading '-' so a failed flush never stops the driver starting
@@ -1437,6 +1775,15 @@ reset_done=0
 # root under systemd, sudo when run by hand; unconditional sudo hangs on a
 # shell with no tty
 if [ "\$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+
+# Already up and receiving: leave it alone. A USB reset of an adapter that is running
+# can wedge it until it is physically replugged.
+state=\$(ip -brief link show "\$IFACE" 2>/dev/null | awk '{print \$2}')
+cstate=\$(ip -details link show "\$IFACE" 2>/dev/null | grep -o 'can state [A-Z-]*' | awk '{print \$3}')
+if [ "\$state" = "UP" ] && [ "\$cstate" != "BUS-OFF" ] && timeout 2 candump -n 1 "\$IFACE" >/dev/null 2>&1; then
+  echo "enablecan: \$IFACE is already up and receiving; adapter left as it is"
+  exit 0
+fi
 
 # USB-level reset: gs_usb will not re-open after 'ip link set down' without
 # one. Match VID:PID, not the product string ("USB2CAN V3.3" varies).
@@ -1818,6 +2165,7 @@ case "$device_type" in
 esac
 
 select_components
+select_domain_id
 
 
 install_number=0
@@ -1833,6 +2181,8 @@ install_total=2
 [ "$install_can" = true ]           && install_total=$((install_total+1))
 [ "$install_cyclone" = true ]       && install_total=$((install_total+1))
 [ "$install_jetpack" = true ]       && install_total=$((install_total+1))
+[ -n "$ros_domain_id" ]             && install_total=$((install_total+1))
+[ "$install_gps" = true ]           && install_total=$((install_total+2))
 
 [ "$ASSUME_YES" != true ] && clear
 
@@ -1861,9 +2211,28 @@ if [ "$install_cyclone" = true ]; then
     print_next_install "Switching ROS 2 to Cyclone DDS"
     if setup_cyclone; then
         print_green "Cyclone DDS set in ~/.bashrc, /etc/environment and the services"
+        print_green "Network ports for ROS from other computers: $(network_interfaces | tr '\n' ' ')(optional; loopback carries the robot's own traffic)"
     else
         print_red "Could not install ros-$ROS_DISTRO-rmw-cyclonedds-cpp; staying on Fast DDS"
         install_cyclone=false
+    fi
+    echo ""
+fi
+
+if [ -n "$ros_domain_id" ]; then
+    print_next_install "Setting ROS_DOMAIN_ID=$ros_domain_id"
+    setup_domain_id
+    print_green "ROS_DOMAIN_ID=$ros_domain_id set in ~/.bashrc, /etc/environment and the services"
+    echo ""
+fi
+
+if [ "$install_gps" = true ]; then
+    print_next_install "Installing the u-blox GPS driver"
+    if install_gps_driver; then
+        print_green "Installed ros-$ROS_DISTRO-ublox-gps (version held; apt upgrade will not change it)"
+    else
+        print_red "Could not install ros-$ROS_DISTRO-ublox-gps; skipping the GPS service"
+        install_gps=false
     fi
     echo ""
 fi
@@ -2067,6 +2436,27 @@ if [ "$install_rs_service" = true ]; then
     echo ""
 fi
 
+if [ "$install_gps" = true ]; then
+    print_next_install "Installing rover-ublox.service"
+    if [ ! -f "$ROVER_ROS2_DIR/roverrobotics_driver/launch/gps.launch.py" ]; then
+        print_yellow "  gps.launch.py is not in $ROVER_ROS2_DIR; update the driver"
+        print_yellow "  repository (jazzy branch) or the GPS service cannot start."
+    fi
+    create_gps_service > /dev/null 2>&1
+    if [ -f /etc/systemd/system/rover-ublox.service ]; then
+        print_green "Succeeded in creating rover-ublox.service"
+    else
+        print_red "Failed creating /etc/systemd/system/rover-ublox.service"
+    fi
+    if systemctl is-enabled --quiet gps-watchdog.timer 2>/dev/null; then
+        print_green "Succeeded in enabling the GPS watchdog (gps-watchdog.timer)"
+    else
+        print_red "Failed enabling gps-watchdog.timer"
+    fi
+    print_italic "  The GPS stays off until you set active: true under ublox_gps_node in accessories.yaml"
+    echo ""
+fi
+
 if [ "$install_udev" = true ]; then
     print_next_install "Installing the udev rules"
 
@@ -2102,7 +2492,7 @@ fi
 
 # Restarts the services if they exist
 if [ -f /etc/systemd/system/roverrobotics.service ] || [ -f /etc/systemd/system/can.service ] \
-   || [ -f /etc/systemd/system/rover-realsense.service ]; then
+   || [ -f /etc/systemd/system/rover-realsense.service ] || [ -f /etc/systemd/system/rover-ublox.service ]; then
     print_next_install "Restarting services for convenience"
     echo ""
     if [ -f /etc/systemd/system/can.service ]; then
@@ -2128,6 +2518,11 @@ if [ -f /etc/systemd/system/roverrobotics.service ] || [ -f /etc/systemd/system/
         else
             print_green "Restarted rover-realsense.service"
         fi
+    fi
+    if [ -f /etc/systemd/system/rover-ublox.service ]; then
+        # a skipped start (GPS switched off) is not a failure
+        sudo systemctl restart rover-ublox.service
+        print_green "Restarted rover-ublox.service"
     fi
     echo ""
 fi
@@ -2167,6 +2562,18 @@ echo ""
 fi
 if [ "$install_cyclone" = true ]; then
 echo "  ROS 2 now uses Cyclone DDS. Open a new terminal before running ros2 commands."
+echo ""
+fi
+if [ -n "$ros_domain_id" ]; then
+echo "  ROS_DOMAIN_ID is $ros_domain_id. Open a new terminal before running ros2 commands."
+echo ""
+fi
+if [ "$install_gps" = true ]; then
+echo "  GPS: switch it on with active: true under ublox_gps_node in"
+echo "  $ROVER_ROS2_DIR/roverrobotics_driver/config/accessories.yaml, then:"
+echo "      cd $WORKSPACE_DIR && colcon build && sudo systemctl restart rover-ublox"
+echo "      ros2 topic hz /fix                      # expect about 8 Hz"
+echo "      systemctl status rover-ublox            # 'skipped' while switched off is normal"
 echo ""
 fi
 if [ "$install_service" = true ]; then

@@ -32,8 +32,9 @@ Usage: ./uninstall_rover_script.sh [options]
 
 With no options it removes everything setup_rover.sh set up on the system:
 services and watchdogs, helper scripts, sudoers entries, udev rules, the
-CAN module config, the Cyclone DDS setting, the install log and the
-workspace line in ~/.bashrc. Your workspace, ROS 2 and NVIDIA software
+CAN module config, the Cyclone DDS and ROS_DOMAIN_ID settings, the GPS
+service and its driver version hold, the install log and the workspace
+line in ~/.bashrc. Your workspace, ROS 2 and NVIDIA software
 are kept.
 
 Also remove (each asks first unless -y):
@@ -131,6 +132,7 @@ echo ""
 # --- services and watchdogs ------------------------------------------------
 print_bold "Services"
 units=(roverrobotics.service rover-realsense.service realsense-watchdog.timer realsense-watchdog.service
+       rover-ublox.service gps-watchdog.timer gps-watchdog.service lo-multicast.service
        can-watchdog.timer can-watchdog.service can.service)
 for u in "${units[@]}"; do
     if [ -f "/etc/systemd/system/$u" ]; then
@@ -147,13 +149,15 @@ print_bold "Helper scripts and system config"
 remove_files /usr/sbin/roverrobotics /usr/sbin/enablecan /usr/sbin/can-watchdog /usr/sbin/can-selftest \
              /usr/sbin/realsense-watchdog /usr/local/sbin/realsense-probe \
              /usr/local/sbin/reset_realsense_usb.sh /usr/local/sbin/reset_bno055_usb.sh \
-             /etc/sudoers.d/rover-realsense /etc/sudoers.d/rover-bno055 \
+             /usr/sbin/gps-watchdog /usr/local/sbin/gps-probe /usr/local/sbin/rover-gps-active \
+             /usr/local/sbin/reset_ublox_usb.sh /etc/cyclonedds/rover.xml \
+             /etc/sudoers.d/rover-realsense /etc/sudoers.d/rover-bno055 /etc/sudoers.d/rover-ublox \
              /etc/modules-load.d/gs_usb.conf /etc/apt/apt.conf.d/90rover-installer-lock-wait \
              "$HOME/rover_setup.log"
 
 # --- udev rules -------------------------------------------------------------
 reload_udev=false
-for rule in 55-roverrobotics.rules 99-can-usb.rules; do
+for rule in 55-roverrobotics.rules 56-rover-ublox.rules 99-can-usb.rules; do
     if [ -f "/etc/udev/rules.d/$rule" ]; then
         remove_files "/etc/udev/rules.d/$rule"; reload_udev=true
     fi
@@ -164,8 +168,21 @@ print_bold "Shell setup"
 # absolute path now, ~ path in older versions
 remove_lines "$HOME/.bashrc" "source ~/$WORKSPACE_NAME/install/setup.bash" \
                              "source $WORKSPACE_DIR/install/setup.bash" \
-                             "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"
-remove_lines /etc/environment "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"
+                             "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" \
+                             "export CYCLONEDDS_URI=file:///etc/cyclonedds/rover.xml"
+remove_lines /etc/environment "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" \
+                              "CYCLONEDDS_URI=file:///etc/cyclonedds/rover.xml"
+# setup_rover.sh writes one ROS_DOMAIN_ID line in each
+mapfile -t domain_lines < <(grep -xE 'export ROS_DOMAIN_ID=[0-9]+' "$HOME/.bashrc" 2>/dev/null)
+[ ${#domain_lines[@]} -gt 0 ] && remove_lines "$HOME/.bashrc" "${domain_lines[@]}"
+mapfile -t domain_lines < <(grep -xE 'ROS_DOMAIN_ID=[0-9]+' /etc/environment 2>/dev/null)
+[ ${#domain_lines[@]} -gt 0 ] && remove_lines /etc/environment "${domain_lines[@]}"
+
+# the GPS driver package stays (ROS packages go with --ros); only the hold set by setup_rover.sh is released
+held=$(apt-mark showhold 2>/dev/null | grep -E '^ros-[a-z]+-ublox-gps$')
+for pkg in $held; do
+    sudo apt-mark unhold "$pkg" >/dev/null && print_green "Released the version hold on $pkg"
+done
 
 # --- optional: workspace ----------------------------------------------------
 if [ "$DO_WORKSPACE" = true ] && [ -d "$WORKSPACE_DIR" ]; then

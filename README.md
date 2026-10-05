@@ -166,8 +166,11 @@ and watchdogs, and nothing it does not.
 | **Intel RealSense** | off | the librealsense SDK and ROS wrapper; see below |
 | **Start the camera at boot** | off | `rover-realsense.service` with a boot delay and a USB reset, and `realsense-watchdog`, which restarts the camera if frames stop. Selects RealSense too |
 | **RPLIDAR S2** | off | the lidar driver |
+| **u-blox GPS** (Jazzy only) | off | the u-blox GPS driver and `rover-ublox.service`, with a data watchdog. The GPS stays off until you switch it on; see [GPS](#gps-jazzy-only) |
 | **Udev rules** | on | stable `/dev` names for the ESCs, IMU, lidar and GPS |
-| **Cyclone DDS** | off | switches ROS 2 from Fast DDS to Cyclone DDS in `~/.bashrc`, `/etc/environment` and the services. Recommended on JetPack 6, where Fast DDS has been seen to stop delivering messages shortly after start |
+| **Cyclone DDS** | off | switches ROS 2 from Fast DDS to Cyclone DDS, set up so the robot keeps working when it loses the network; see [Cyclone DDS](#cyclone-dds-and-losing-the-network). Recommended on Jetsons, where Fast DDS has been seen to stop delivering messages shortly after start |
+
+The installer also asks for a **ROS_DOMAIN_ID**; see [ROS domain](#ros-domain).
 
 The BNO055 driver comes from `ssharma0704/bno055` branch `fix-startup-race`:
 upstream `flynneva/bno055` plus a retry of the serial connect and sensor setup,
@@ -177,6 +180,92 @@ before the IMU's serial port appears.
 Installing a sensor driver does not switch it on by itself: set `active: true`
 for that sensor in `roverrobotics_driver/config/accessories.yaml`, since
 `accessories.launch.py` only starts a node whose `active` flag is true.
+
+### ROS domain
+
+`ROS_DOMAIN_ID` keeps one robot's ROS traffic apart from other robots on the same
+network. Without it every robot uses domain 0, and one robot's controller can drive
+another. Give each robot its own number from 0 to 101.
+
+The installer writes it to `~/.bashrc`, `/etc/environment` and every service it
+creates. If `~/.bashrc` already has one, that number is the default, so re-running
+the installer keeps it. Leave the question empty for the ROS default (0).
+
+### Cyclone DDS and losing the network
+
+**The problem.** Out of the box, Cyclone DDS ties all ROS traffic to one network
+port, normally the WiFi, even the messages between programs on the robot itself:
+controller, input manager and driver. When the robot drives out of WiFi range,
+that address disappears and every message stops. The controller seems to freeze
+and the driver stops the robot, until the WiFi comes back. Logs show
+`ddsi_udp_conn_write ... failed with retcode -1`.
+
+**What the Cyclone option sets up to prevent it:**
+
+- `/etc/cyclonedds/rover.xml`, which tells Cyclone to carry the robot's own traffic
+  on **loopback** (`lo`), the computer's internal network. Loopback is always there,
+  with or without a network, so the controller and the driver keep talking.
+- The robot's **WiFi and Ethernet ports**, found automatically, listed in the same
+  file as **optional**: used when they are connected, so a laptop on the network
+  still sees the robot's topics, and never required, so the robot also starts
+  with no network at all.
+- `lo-multicast.service`, which switches on multicast for loopback at every boot.
+  Linux leaves it off, and Cyclone needs it to find the other programs.
+- `CYCLONEDDS_URI` pointing at that file in `~/.bashrc`, `/etc/environment` and
+  every service.
+
+Tested on ROS 2 Humble and Jazzy: with the WiFi switched off for 20 seconds, the
+controller and odometry kept running without a gap.
+
+One limit: if the robot software starts while no network is connected, laptops
+cannot see the robot's topics until it is restarted
+(`sudo systemctl restart roverrobotics`). Driving is not affected.
+
+Re-run the installer after adding a network port, such as a USB WiFi adapter, so
+it is added to the file.
+
+### GPS (Jazzy only)
+
+For a **u-blox ZED-F9P** receiver on USB, which appears as `/dev/ublox-gps`.
+The installer:
+
+- installs the driver package `ros-jazzy-ublox-gps` and holds its version, so an
+  `apt upgrade` cannot change how it reads the settings
+- creates `rover-ublox.service`, which runs the GPS separately from the driver: if
+  the GPS drops out, the robot keeps driving
+
+The settings and the on/off switch are in the `ublox_gps_node` block of
+`roverrobotics_driver/config/accessories.yaml`, off by default. To switch it on, set
+`active: true` there, then:
+
+```bash
+cd ~/rover_workspace && colcon build && sudo systemctl restart rover-ublox
+ros2 topic hz /fix          # about 8 Hz
+```
+
+While it is off, `systemctl status rover-ublox` shows the service as skipped. That
+is normal: it checks the switch once at each start and does nothing else.
+
+**Add the GPS to your robot's model too.** None of the robot models include it by
+default, and navigation needs to know where the antenna sits (frame `gps_link`). In
+your robot's URDF in `roverrobotics_description/urdf/` (for example `miti.urdf`), add
+`<xacro:include filename="$(find roverrobotics_description)/urdf/accessories/gps.urdf" />`
+next to the other sensors, set the antenna position in `accessories/gps.urdf`, then
+`colcon build` and `sudo systemctl restart roverrobotics`. See the GPS section of the
+driver README (jazzy branch) for the full steps.
+
+What the service does for you:
+
+| Situation | What happens |
+|---|---|
+| Receiver enumerates late at boot | waits up to 30 s for `/dev/ublox-gps` |
+| Receiver plugged in later | the GPS starts as soon as it appears |
+| Receiver missing | retries every 3 s, slowing to once a minute, and never gives up |
+| Receiver hung | a USB power-cycle of the receiver before every start |
+| Driver running but `/fix` silent | `gps-watchdog` restarts the GPS after two missed checks |
+| No satellite fix (indoors) | nothing: not a fault a restart can cure |
+
+Topics: `/fix`, `/fix_velocity` and `/navpvt`, in frame `gps_link`.
 
 ### Intel RealSense (optional)
 
@@ -283,7 +372,10 @@ ticked by default. See [CAN interface naming](#can-interface-naming) below.
     --with-realsense Intel RealSense SDK and ROS wrapper
     --no-realsense   Skip RealSense without being asked
     --with-rs-service  Start the camera at boot, with watchdog (implies --with-realsense)
-    --with-cyclone   Use Cyclone DDS (default: Fast DDS)
+    --with-cyclone   Use Cyclone DDS (default: Fast DDS), set up so the robot
+                     keeps working when it loses the network
+    --domain-id N    ROS_DOMAIN_ID 0-101 (default: keep the one in ~/.bashrc)
+    --with-gps       u-blox GPS driver and service (Jazzy only)
     --with-jetpack   Jetson + RealSense: install JetPack and CUDA if CUDA is missing
     --no-jetpack     Never install JetPack/CUDA
     --no-udev        Skip the udev rules
@@ -298,6 +390,7 @@ ticked by default. See [CAN interface naming](#can-interface-naming) below.
 ./setup_rover.sh --robot miti --gamepad ps5 --with-service -y
 ./setup_rover.sh -r max -w 13 -g ps5 --with-imu -y
 ./setup_rover.sh -r miti -g ps5 --with-service --with-imu --with-rs-service --with-cyclone -y
+./setup_rover.sh -r max -w 13 -g ps5 --with-service --with-cyclone --domain-id 29 --with-gps -y
 ```
 
 `--yes` requires `--robot`, and `--robot max` also requires `--max-wheel`.
@@ -346,7 +439,7 @@ which mode it settled on.
 | `/etc/udev/rules.d/55-roverrobotics.rules` | Stable `/dev` names for ESCs, IMU, LIDAR, GPS | `setup_rover.sh` |
 | `/etc/udev/rules.d/99-can-usb.rules` | Renames the USB-CAN adapter to `rovercan` | both |
 | `/etc/modules-load.d/gs_usb.conf` | Loads `gs_usb` at boot (Jetson only) | both |
-| `/usr/sbin/enablecan` | Resets the adapter and brings the CAN link up | both |
+| `/usr/sbin/enablecan` | Brings the CAN link up; resets the adapter only if the link is down, bus-off or silent | both |
 | `/etc/systemd/system/can.service` | Runs `enablecan` at boot | both |
 | `/usr/sbin/can-watchdog` + `.service` + `.timer` | Restarts `can.service` if the link drops or goes bus-off | `setup_rover.sh` |
 | `/usr/sbin/can-selftest` | Says whether a silent bus is the adapter or the rover | `setup_rover.sh` |
@@ -355,7 +448,15 @@ which mode it settled on.
 | `/etc/systemd/system/rover-realsense.service` | Starts the camera node at boot | `setup_rover.sh` (RealSense service) |
 | `/usr/sbin/realsense-watchdog` + `.service` + `.timer`, `/usr/local/sbin/realsense-probe` | Restarts the camera if frames stop | `setup_rover.sh` (RealSense service) |
 | `/usr/local/sbin/reset_bno055_usb.sh`, `/etc/sudoers.d/rover-bno055` | Flushes the IMU serial port before each driver start | `setup_rover.sh` (IMU + driver at boot) |
-| `/etc/environment`, `~/.bashrc` | `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` | `setup_rover.sh` (Cyclone DDS) |
+| `/etc/environment`, `~/.bashrc` | `RMW_IMPLEMENTATION`, `CYCLONEDDS_URI` | `setup_rover.sh` (Cyclone DDS) |
+| `/etc/cyclonedds/rover.xml` | Loopback for the robot's own traffic, network ports optional | `setup_rover.sh` (Cyclone DDS) |
+| `/etc/systemd/system/lo-multicast.service` | Multicast on loopback at boot | `setup_rover.sh` (Cyclone DDS) |
+| `/etc/environment`, `~/.bashrc` | `ROS_DOMAIN_ID` | `setup_rover.sh` (ROS domain) |
+| `/etc/systemd/system/rover-ublox.service` | Runs the GPS when it is switched on | `setup_rover.sh` (GPS) |
+| `/usr/local/sbin/rover-gps-active` | The on/off check `rover-ublox` runs at each start | `setup_rover.sh` (GPS) |
+| `/usr/local/sbin/reset_ublox_usb.sh`, `/etc/sudoers.d/rover-ublox` | Power-cycles the receiver over USB before each start | `setup_rover.sh` (GPS) |
+| `/usr/sbin/gps-watchdog` + `.service` + `.timer`, `/usr/local/sbin/gps-probe` | Restarts the GPS if `/fix` stops | `setup_rover.sh` (GPS) |
+| `/etc/udev/rules.d/56-rover-ublox.rules` | Starts the GPS when the receiver is plugged in | `setup_rover.sh` (GPS) |
 | `/usr/sbin/roverrobotics` | Sources ROS and the workspace, launches the driver | `setup_rover.sh` |
 | `/etc/systemd/system/roverrobotics.service` | Starts the driver at boot | `setup_rover.sh` |
 
@@ -446,6 +547,10 @@ journalctl -u roverrobotics.service -f
 | Camera node starts then dies repeatedly | D435i USB enumeration failure | `rover-realsense.service` power-cycles it each start; check `journalctl -u rover-realsense` |
 | `librealsense2` has no install candidate | Intel publishes no build for this Ubuntu release | Build from source, or use a release Intel supports |
 | Sensor installed but no topics | `active: false` in `accessories.yaml` | Set `active: true` for that sensor and rebuild |
+| Controller and robot stop when the robot leaves the WiFi, recover when it is back | ROS traffic tied to the WiFi address (`ddsi_udp_conn_write ... failed` in the log) | Re-run with `--with-cyclone`; see [Cyclone DDS](#cyclone-dds-and-losing-the-network) |
+| A laptop cannot see the robot's topics | Different `ROS_DOMAIN_ID` or DDS on the laptop, or the robot software started with no network | Use the robot's domain and the same DDS; restart `roverrobotics` after the network is up |
+| `rover-ublox` shows "skipped" | GPS switched off | Expected; set `active: true` under `ublox_gps_node` to switch it on |
+| `rover-ublox: /dev/ublox-gps not found` | Receiver unplugged or not a `1546:01a9` u-blox | Plug it in; it starts by itself. For another receiver, add its ID to the udev rules |
 
 After changing a config or updating the driver, restart the service instead of
 rebooting:
@@ -479,9 +584,10 @@ cd ~/rover_workspace && colcon build
 ```
 
 With no options it removes everything `setup_rover.sh` set up on the system:
-every service and watchdog (driver, CAN, camera), the helper scripts, the
+every service and watchdog (driver, CAN, camera, GPS), the helper scripts, the
 sudoers entries, the udev rules, the `gs_usb` module config, the Cyclone DDS
-setting, the install log and the workspace line in `~/.bashrc`. It keeps your
+setting and its config file, the `ROS_DOMAIN_ID` lines, the version hold on the GPS
+driver, the install log and the workspace line in `~/.bashrc`. It keeps your
 workspace, ROS 2 and the NVIDIA software.
 
 To remove more, add any of these. Each one asks before it removes anything,
@@ -535,6 +641,13 @@ survives a reboot. The **InnoMaker USB2CAN V3.3** does.
 
 `sudo can-selftest` identifies the condition in about two seconds instead of
 sending you looking at cables.
+
+The same can happen to an adapter that is running: on a Jetson Orin Nano, a USB
+reset of a `1d50:606f` adapter that was up and receiving left it dead twice in a
+row, while resets of a freshly plugged adapter worked. `enablecan` therefore leaves
+a working adapter alone: if `rovercan` is up, not bus-off, and a frame arrives within
+2 seconds, it skips the reset. Re-running the installer or restarting `can.service`
+on a running robot no longer touches the adapter.
 
 ---
 
