@@ -8,6 +8,10 @@ KERNEL=="ttyUSB*", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", MODE:="077
 KERNEL=="ttyUSB*", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6014", MODE:="0777", SYMLINK+="bno055"
 KERNEL=="ttyACM*", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a9", MODE:="0777", SYMLINK+="ublox-gps"
 
+# Gamepad: read access to a PS4/PS5 controller's raw reports (Bluetooth 0005, USB 0003),
+# used by the input manager to stop the robot when the controller link stalls
+SUBSYSTEM=="hidraw", KERNELS=="0005:054C:*", MODE="0664"
+SUBSYSTEM=="hidraw", KERNELS=="0003:054C:*", MODE="0664"
 # Rover ESC Udev Rules
 KERNEL=="ttyUSB[0-9]", ATTRS{idVendor}=="0403", ATTRS{serial}=="Rover Zero 2", MODE:="0777", SYMLINK+="rover-control", RUN+="/bin/setserial /dev/%k low_latency"
 KERNEL=="ttyUSB[0-9]", ATTRS{idVendor}=="0403", ATTRS{serial}=="Rover Pro", MODE:="0777", SYMLINK+="rover-pro", RUN+="/bin/setserial /dev/%k low_latency"

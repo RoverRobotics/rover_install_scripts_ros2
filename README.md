@@ -436,7 +436,7 @@ which mode it settled on.
 |---|---|---|
 | `~/rover_workspace/` | ROS 2 workspace and source repos | `setup_rover.sh` |
 | `~/rover_setup.log` | Full output of every install step | `setup_rover.sh` |
-| `/etc/udev/rules.d/55-roverrobotics.rules` | Stable `/dev` names for ESCs, IMU, LIDAR, GPS | `setup_rover.sh` |
+| `/etc/udev/rules.d/55-roverrobotics.rules` | Stable `/dev` names for ESCs, IMU, LIDAR, GPS; read access to a PS4/PS5 controller's raw reports, so the input manager can stop the robot when the controller link stalls | `setup_rover.sh` |
 | `/etc/udev/rules.d/99-can-usb.rules` | Renames the USB-CAN adapter to `rovercan` | both |
 | `/etc/modules-load.d/gs_usb.conf` | Loads `gs_usb` at boot (Jetson only) | both |
 | `/usr/sbin/enablecan` | Brings the CAN link up; resets the adapter only if the link is down, bus-off or silent | both |
