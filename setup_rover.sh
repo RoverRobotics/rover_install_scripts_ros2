@@ -1050,9 +1050,10 @@ systemctl is-active --quiet "$UNIT" || exit 0
 
 # give a fresh start time to open the sensors
 since=$(systemctl show "$UNIT" -p ActiveEnterTimestampMonotonic --value)
-now=$(awk '{printf "%d", $1 * 1000000}' /proc/uptime)
+# seconds in bash arithmetic: mawk's %d saturates at 2^31 and silently disabled this check
+now=$(cut -d. -f1 /proc/uptime)
 [ -n "$since" ] && [ "$since" -gt 0 ] || exit 0
-[ $(( (now - since) / 1000000 )) -ge "$SETTLE" ] || exit 0
+[ $(( now - since / 1000000 )) -ge "$SETTLE" ] || exit 0
 
 export HOME=RUN_HOME_PLACEHOLDER
 # probe with the unit's own ROS env
@@ -1157,6 +1158,217 @@ EOF_IMURESET
     fi
 }
 
+# The IMU gets its own service, like the GPS: a wedged sensor must not stop the robot driving,
+# and every restart then re-flushes or re-enumerates its USB bridge on the way back up.
+create_bno055_service() {
+    local accessories="$WORKSPACE_DIR/install/roverrobotics_driver/share/roverrobotics_driver/config/accessories.yaml"
+
+    sudo tee /usr/local/sbin/rover-imu-active >/dev/null <<EOF_IMUACTIVE
+#!/usr/bin/env python3
+# Exit 0 if bno055 is set active in the installed accessories.yaml, else 1.
+import sys
+import time
+import yaml
+try:
+    with open('$accessories') as f:
+        cfg = yaml.safe_load(f) or {}
+except OSError:
+    sys.exit(1)
+imu = (cfg.get('bno055') or {}).get('ros__parameters') or {}
+if imu.get('active', False) is True:
+    sys.exit(0)
+print('rover-bno055: IMU is off (active: false under bno055 in accessories.yaml)')
+# systemd 249 (Jammy) has no restart backoff, so without this pause a switched-off
+# sensor is skipped and retried every 3 s forever. --no-wait is for callers that
+# only want the answer, like imu-watchdog.
+if '--no-wait' not in sys.argv:
+    time.sleep(30)
+sys.exit(1)
+EOF_IMUACTIVE
+    sudo chmod +x /usr/local/sbin/rover-imu-active
+
+    sudo tee /etc/systemd/system/rover-bno055.service >/dev/null <<EOF_IMUSVC
+[Unit]
+Description=BNO055 IMU ROS 2 node
+Wants=network-online.target
+# ordering only: no PartOf, so a driver restart does not bounce the IMU and an IMU
+# problem never reaches the driver
+After=network-online.target roverrobotics.service
+# never give up: the IMU can wedge or be unplugged and come back
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=$USER
+Environment=HOME=$HOME
+WorkingDirectory=$HOME
+ExecCondition=/usr/local/sbin/rover-imu-active
+# flush the port, or re-enumerate the FT232H if the port is gone, before every start
+ExecStartPre=-/usr/bin/sudo -n /usr/local/sbin/reset_bno055_usb.sh
+# the bridge may enumerate late at boot or after the reset
+ExecStartPre=/bin/bash -c 'for i in \$(seq 30); do [ -e /dev/bno055 ] && exit 0; sleep 1; done; echo "rover-bno055: /dev/bno055 not found"; exit 1'
+ExecStart=/bin/bash -c 'source /opt/ros/$ROS_DISTRO/setup.bash && source $WORKSPACE_DIR/install/setup.bash && exec ros2 launch roverrobotics_driver imu.launch.py'
+Restart=always
+# a missing sensor backs off through the 30 s device wait below, not through
+# RestartSteps/RestartMaxDelaySec, which systemd 249 on Jammy ignores
+RestartSec=3
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
+EOF_IMUSVC
+
+    add_ros_env /etc/systemd/system/rover-bno055.service
+}
+
+# The node can stay up while publishing nothing, which systemd cannot see; judge the topic.
+create_bno055_watchdog() {
+    sudo tee /usr/local/sbin/imu-probe >/dev/null <<'EOF_IMUPROBE'
+#!/usr/bin/env python3
+# Exit 0 if an IMU sample arrives on the topic within the timeout, else 1.
+import sys, time
+import rclpy
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import Imu
+
+topic   = sys.argv[1] if len(sys.argv) > 1 else '/imu/data'
+timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 6.0
+
+rclpy.init(args=None)
+node = rclpy.create_node('imu_probe')
+seen = []
+# best effort: the IMU driver publishes with sensor data QoS
+node.create_subscription(Imu, topic, lambda _m: seen.append(1),
+                         qos_profile_sensor_data)
+
+deadline = time.monotonic() + timeout
+while rclpy.ok() and not seen and time.monotonic() < deadline:
+    rclpy.spin_once(node, timeout_sec=0.2)
+
+node.destroy_node()
+rclpy.shutdown()
+sys.exit(0 if seen else 1)
+EOF_IMUPROBE
+    sudo chmod +x /usr/local/sbin/imu-probe
+
+    sudo tee /usr/sbin/imu-watchdog >/dev/null <<'EOF_IMUWD'
+#!/bin/bash
+# Restart rover-bno055.service when the IMU topic goes quiet, and say so plainly when
+# software has run out of options. Overridable by env for testing.
+TOPIC=${IMU_TOPIC:-/imu/data}
+UNIT=${IMU_UNIT:-rover-bno055.service}
+PROBE=/usr/local/sbin/imu-probe
+SETTLE=${IMU_SETTLE:-45}
+WAIT=${IMU_WAIT:-6}
+# consecutive failed cycles before we stop blaming software
+ATTEMPTS=${IMU_ATTEMPTS:-5}
+STATE=${IMU_STATE:-/run/rover-imu-watchdog.fails}
+FLAG=${IMU_FLAG:-/run/rover-imu-unrecoverable}
+# the flag above is in /run, which is cleared by a reboot, and so is the journal's memory
+# of why: this file is the record that survives the power cycle the escalation asks for
+EVENTS=${IMU_EVENTS:-/var/log/rover-imu-events.log}
+
+note() {
+    printf '%s %s\n' "$(date -Is)" "$1" >> "$EVENTS" 2>/dev/null || return 0
+    # one line an event, but never let it grow without limit
+    if [ "$(wc -l < "$EVENTS" 2>/dev/null || echo 0)" -gt 400 ]; then
+        tail -n 200 "$EVENTS" > "$EVENTS.tmp" 2>/dev/null &&
+            mv "$EVENTS.tmp" "$EVENTS" 2>/dev/null
+    fi
+}
+
+# switched off in accessories.yaml: nothing to do
+/usr/local/sbin/rover-imu-active --no-wait >/dev/null 2>&1 || exit 0
+# 'activating' counts: with the sensor missing the unit never leaves its device wait,
+# and that is exactly when the bridge needs reporting
+case "$(systemctl is-active "$UNIT")" in
+    active|activating) ;;
+    *) exit 0 ;;
+esac
+
+# a bridge missing from the USB bus is conclusive whenever it happens, including a boot
+# with no IMU attached, where the unit never reaches active and so has no timestamp to
+# measure against: say so once, and no restart can help
+if ! lsusb | grep -qi '0403:6014'; then
+    if [ ! -e "$FLAG" ]; then
+        echo "imu-watchdog: FT232H 0403:6014 is not on the USB bus; the IMU bridge or its cable needs attention, a restart cannot fix this"
+        date -Is > "$FLAG"
+        note "UNRECOVERABLE: FT232H 0403:6014 not on the USB bus; bridge or cable needs attention"
+    fi
+    exit 0
+fi
+
+# past here the topic is judged, so do not judge a start that is still coming up
+since=$(systemctl show "$UNIT" -p ActiveEnterTimestampMonotonic --value)
+# seconds in bash arithmetic: mawk's %d saturates at 2^31 and silently disabled this check
+now=$(cut -d. -f1 /proc/uptime)
+[ -n "$since" ] && [ "$since" -gt 0 ] || exit 0
+[ $(( now - since / 1000000 )) -ge "$SETTLE" ] || exit 0
+
+export HOME=RUN_HOME_PLACEHOLDER
+# probe with the unit's own ROS env
+for kv in $(systemctl show "$UNIT" -p Environment --value); do
+    case "$kv" in ROS_*|RMW_*|CYCLONEDDS_*) export "$kv" ;; esac
+done
+source /opt/ros/ROS_DISTRO_PLACEHOLDER/setup.bash >/dev/null 2>&1
+source WORKSPACE_PLACEHOLDER/install/setup.bash   >/dev/null 2>&1
+
+for try in 1 2; do
+    if "$PROBE" "$TOPIC" "$WAIT"; then
+        if [ -e "$FLAG" ] || [ -e "$STATE" ]; then
+            note "recovered: $TOPIC publishing again after $(cat "$STATE" 2>/dev/null || echo 0) failed cycle(s)"
+        fi
+        rm -f "$STATE" "$FLAG"
+        exit 0
+    fi
+    [ "$try" = 1 ] && sleep 3
+done
+
+fails=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
+echo "$fails" > "$STATE"
+
+echo "imu-watchdog: nothing on $TOPIC across two ${WAIT}s probes (failed cycle $fails); restarting $UNIT"
+systemctl restart "$UNIT"
+
+if [ "$fails" -ge "$ATTEMPTS" ] && [ ! -e "$FLAG" ]; then
+    echo "imu-watchdog: IMU still quiet after $fails recovery cycles; it needs its power removed (a USB re-enumeration cannot reset a latched sensor)"
+    date -Is > "$FLAG"
+    note "UNRECOVERABLE: still quiet after $fails recovery cycles; the sensor needs its power removed"
+fi
+exit 0
+EOF_IMUWD
+    sudo sed -i "s|RUN_HOME_PLACEHOLDER|$HOME|; s|ROS_DISTRO_PLACEHOLDER|$ROS_DISTRO|; s|WORKSPACE_PLACEHOLDER|$WORKSPACE_DIR|" \
+        /usr/sbin/imu-watchdog
+    sudo chmod +x /usr/sbin/imu-watchdog
+
+    sudo tee /etc/systemd/system/imu-watchdog.service >/dev/null <<'EOF_IMUWDSVC'
+[Unit]
+Description=Recover the BNO055 if the IMU has stopped publishing
+After=rover-bno055.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=120
+ExecStart=/usr/sbin/imu-watchdog
+EOF_IMUWDSVC
+
+    sudo tee /etc/systemd/system/imu-watchdog.timer >/dev/null <<'EOF_IMUWDTMR'
+[Unit]
+Description=Periodically verify the IMU is publishing
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+AccuracySec=1
+Unit=imu-watchdog.service
+
+[Install]
+WantedBy=timers.target
+EOF_IMUWDTMR
+}
+
 # ROS_DOMAIN_ID: the flag, else the one already in ~/.bashrc, else ask (empty = ROS default 0)
 select_domain_id() {
     local existing
@@ -1225,6 +1437,7 @@ create_gps_service() {
 #!/usr/bin/env python3
 # Exit 0 if ublox_gps_node is set active in the installed accessories.yaml, else 1.
 import sys
+import time
 import yaml
 try:
     with open('$accessories') as f:
@@ -1235,6 +1448,9 @@ gps = (cfg.get('ublox_gps_node') or {}).get('ros__parameters') or {}
 if gps.get('active', False) is True:
     sys.exit(0)
 print('rover-ublox: GPS is off (active: false under ublox_gps_node in accessories.yaml)')
+# systemd 249 (Jammy) has no restart backoff, so without this pause a switched-off
+# receiver is skipped and retried every 3 s forever
+time.sleep(30)
 sys.exit(1)
 EOF_GPSACTIVE
     sudo chmod +x /usr/local/sbin/rover-gps-active
@@ -1284,10 +1500,9 @@ ExecStartPre=-/usr/bin/sudo -n /usr/local/sbin/reset_ublox_usb.sh
 ExecStartPre=/bin/bash -c 'for i in \$(seq 30); do [ -e /dev/ublox-gps ] && exit 0; sleep 1; done; echo "rover-ublox: /dev/ublox-gps not found"; exit 1'
 ExecStart=/bin/bash -c 'source /opt/ros/$ROS_DISTRO/setup.bash && source $WORKSPACE_DIR/install/setup.bash && exec ros2 launch roverrobotics_driver gps.launch.py'
 Restart=always
-# back off from 3 s to one try a minute while the receiver is missing
+# a missing receiver backs off through the 30 s device wait below, not through
+# RestartSteps/RestartMaxDelaySec, which systemd 249 on Jammy ignores
 RestartSec=3
-RestartSteps=5
-RestartMaxDelaySec=60
 KillMode=mixed
 KillSignal=SIGINT
 TimeoutStopSec=15
@@ -1352,9 +1567,10 @@ WAIT=8
 # GPS switched off, stopped on purpose, or still starting: nothing to do
 systemctl is-active --quiet "$UNIT" || exit 0
 since=$(systemctl show "$UNIT" -p ActiveEnterTimestampMonotonic --value)
-now=$(awk '{printf "%d", $1 * 1000000}' /proc/uptime)
+# seconds in bash arithmetic: mawk's %d saturates at 2^31 and silently disabled this check
+now=$(cut -d. -f1 /proc/uptime)
 [ -n "$since" ] && [ "$since" -gt 0 ] || exit 0
-[ $(( (now - since) / 1000000 )) -ge "$SETTLE" ] || exit 0
+[ $(( now - since / 1000000 )) -ge "$SETTLE" ] || exit 0
 
 export HOME=RUN_HOME_PLACEHOLDER
 # probe with the unit's own ROS env
@@ -1710,13 +1926,22 @@ EOF3
     local unit=/etc/systemd/system/roverrobotics.service
     add_ros_env "$unit"
     if [ "$install_imu" = true ]; then
+        if [ ! -f "$ROVER_ROS2_DIR/roverrobotics_driver/launch/imu.launch.py" ]; then
+            print_yellow "  imu.launch.py is not in $ROVER_ROS2_DIR; update the driver"
+            print_yellow "  repository or rover-bno055.service cannot start."
+        fi
+        # the IMU owns its port reset in rover-bno055.service, so the driver unit needs none
         create_bno055_reset
-        # leading '-' so a failed flush never stops the driver starting
-        sudo sed -i '/^ExecStart=/i ExecStartPre=-/usr/bin/sudo -n /usr/local/sbin/reset_bno055_usb.sh' "$unit"
+        create_bno055_service
+        create_bno055_watchdog
     fi
 
     sudo systemctl daemon-reload
     sudo systemctl enable roverrobotics.service
+    if [ "$install_imu" = true ]; then
+        sudo systemctl enable rover-bno055.service
+        sudo systemctl enable --now imu-watchdog.timer
+    fi
 }
 
 create_can_service() {
@@ -2403,9 +2628,19 @@ if [ "$install_service" = true ]; then
         print_green "Succeeded in creating the startup service."
         if [ "$install_imu" = true ]; then
             if [ -f /usr/local/sbin/reset_bno055_usb.sh ]; then
-                print_green "Succeeded in adding the IMU serial flush before each driver start"
+                print_green "Succeeded in creating the IMU serial-port reset helper"
             else
                 print_red "Failed creating /usr/local/sbin/reset_bno055_usb.sh"
+            fi
+            if [ -f /etc/systemd/system/rover-bno055.service ]; then
+                print_green "Succeeded in creating rover-bno055.service"
+            else
+                print_red "Failed creating /etc/systemd/system/rover-bno055.service"
+            fi
+            if systemctl is-enabled --quiet imu-watchdog.timer 2>/dev/null; then
+                print_green "Succeeded in enabling the IMU watchdog (imu-watchdog.timer)"
+            else
+                print_red "Failed enabling imu-watchdog.timer"
             fi
         fi
     else

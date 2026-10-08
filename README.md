@@ -162,7 +162,7 @@ and watchdogs, and nothing it does not.
 |---|---|---|
 | **Start the driver at boot** | off | `roverrobotics.service`, which launches the driver at boot, restarts it if it exits, and stops it gracefully so it brakes the motors |
 | **USB-CAN adapter** (CAN robots only) | on | `rovercan` udev rule, `can.service`, `can-watchdog` (restarts CAN if the link drops or the bus goes bus-off) and `can-selftest`; see [CAN interface naming](#can-interface-naming) |
-| **BNO055 IMU** | off | the IMU driver. With the driver starting at boot, also a serial flush before each start (`reset_bno055_usb.sh`), so a desynced IMU port cannot keep the driver in a restart loop |
+| **BNO055 IMU** | off | the patched IMU driver and `rover-bno055.service`, which runs the IMU on its own so that losing it never stops the robot: it clears the serial port before each start, waits for an IMU that appears late at boot, and restarts it if it exits. Also `imu-watchdog`, which restarts the IMU if `/imu/data` stops and reports when only removing the sensor's power can help. The IMU stays off until you switch it on in `accessories.yaml` |
 | **Intel RealSense** | off | the librealsense SDK and ROS wrapper; see below |
 | **Start the camera at boot** | off | `rover-realsense.service` with a boot delay and a USB reset, and `realsense-watchdog`, which restarts the camera if frames stop. Selects RealSense too |
 | **RPLIDAR S2** | off | the lidar driver |
@@ -175,11 +175,17 @@ The installer also asks for a **ROS_DOMAIN_ID**; see [ROS domain](#ros-domain).
 The BNO055 driver comes from `ssharma0704/bno055` branch `fix-startup-race`:
 upstream `flynneva/bno055` plus a retry of the serial connect and sensor setup,
 submitted upstream as flynneva/bno055 pull request 85. Upstream can exit at boot
-before the IMU's serial port appears.
+before the IMU's serial port appears. The branch also makes that retry reach its
+later attempts, which an already-declared parameter and an exit inside the sensor
+setup used to prevent, and makes the driver give up after a few seconds of failed
+reads rather than stay running and publish nothing when the sensor goes away.
 
 Installing a sensor driver does not switch it on by itself: set `active: true`
-for that sensor in `roverrobotics_driver/config/accessories.yaml`, since
-`accessories.launch.py` only starts a node whose `active` flag is true.
+for that sensor in `roverrobotics_driver/config/accessories.yaml`, since a sensor
+is only started when its `active` flag is true. The IMU and the GPS each read that
+same file from their own launch file, `imu.launch.py` and `gps.launch.py`, run by
+their own service; the other sensors are started by `accessories.launch.py` with
+the robot software.
 
 ### ROS domain
 
@@ -447,7 +453,11 @@ which mode it settled on.
 | `/etc/sudoers.d/rover-realsense` | NOPASSWD for that one reset script | `setup_rover.sh` (RealSense service) |
 | `/etc/systemd/system/rover-realsense.service` | Starts the camera node at boot | `setup_rover.sh` (RealSense service) |
 | `/usr/sbin/realsense-watchdog` + `.service` + `.timer`, `/usr/local/sbin/realsense-probe` | Restarts the camera if frames stop | `setup_rover.sh` (RealSense service) |
-| `/usr/local/sbin/reset_bno055_usb.sh`, `/etc/sudoers.d/rover-bno055` | Flushes the IMU serial port before each driver start | `setup_rover.sh` (IMU + driver at boot) |
+| `/usr/local/sbin/reset_bno055_usb.sh`, `/etc/sudoers.d/rover-bno055` | Flushes the IMU serial port before each IMU start, and power-cycles the bridge over USB when the port is missing entirely | `setup_rover.sh` (IMU) |
+| `/etc/systemd/system/rover-bno055.service` | Runs the IMU when it is switched on, waits for one that appears late at boot and restarts it if it exits | `setup_rover.sh` (IMU) |
+| `/usr/local/sbin/rover-imu-active` | The on/off check `rover-bno055` runs at each start | `setup_rover.sh` (IMU) |
+| `/usr/sbin/imu-watchdog` + `.service` + `.timer`, `/usr/local/sbin/imu-probe` | Restarts the IMU if `/imu/data` stops, and reports when only removing the sensor's power can help | `setup_rover.sh` (IMU) |
+| `/var/log/rover-imu-events.log` | One line per IMU escalation and recovery, kept so the record outlives a power cycle | `imu-watchdog` |
 | `/etc/environment`, `~/.bashrc` | `RMW_IMPLEMENTATION`, `CYCLONEDDS_URI` | `setup_rover.sh` (Cyclone DDS) |
 | `/etc/cyclonedds/rover.xml` | Loopback for the robot's own traffic, network ports optional | `setup_rover.sh` (Cyclone DDS) |
 | `/etc/systemd/system/lo-multicast.service` | Multicast on loopback at boot | `setup_rover.sh` (Cyclone DDS) |

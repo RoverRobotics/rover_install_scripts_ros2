@@ -133,6 +133,7 @@ echo ""
 print_bold "Services"
 units=(roverrobotics.service rover-realsense.service realsense-watchdog.timer realsense-watchdog.service
        rover-ublox.service gps-watchdog.timer gps-watchdog.service lo-multicast.service
+       rover-bno055.service imu-watchdog.timer imu-watchdog.service
        can-watchdog.timer can-watchdog.service can.service)
 for u in "${units[@]}"; do
     if [ -f "/etc/systemd/system/$u" ]; then
@@ -148,6 +149,8 @@ sudo systemctl reset-failed 2>/dev/null
 print_bold "Helper scripts and system config"
 remove_files /usr/sbin/roverrobotics /usr/sbin/enablecan /usr/sbin/can-watchdog /usr/sbin/can-selftest \
              /usr/sbin/realsense-watchdog /usr/local/sbin/realsense-probe \
+             /usr/sbin/imu-watchdog /usr/local/sbin/imu-probe /usr/local/sbin/rover-imu-active \
+             /var/log/rover-imu-events.log \
              /usr/local/sbin/reset_realsense_usb.sh /usr/local/sbin/reset_bno055_usb.sh \
              /usr/sbin/gps-watchdog /usr/local/sbin/gps-probe /usr/local/sbin/rover-gps-active \
              /usr/local/sbin/reset_ublox_usb.sh /etc/cyclonedds/rover.xml \
