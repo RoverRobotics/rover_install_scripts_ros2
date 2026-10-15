@@ -1704,13 +1704,41 @@ clone_or_update() {
     if [ -d "$dest/.git" ]; then
         print_italic "  $name already present, updating"
         run_with_progress "Fetching $name" 20 git -C "$dest" fetch --all --prune
+
+        # patch_* below edits tracked files, so --ff-only would refuse and the robot
+        # would silently keep old code. Shelve, fast-forward, restore.
+        local stashed=0
+        if ! git -C "$dest" diff --quiet 2>/dev/null; then
+            if git -C "$dest" stash push -q -m "rover-setup $(date +%F)" 2>/dev/null; then
+                stashed=1
+                print_italic "  Shelved local changes to $name"
+            else
+                print_red "  Could not shelve local changes in $dest"
+                print_red "  $name NOT updated: it keeps the code already on disk"
+                return 0
+            fi
+        fi
+
         if [ -n "$branch" ]; then
             git -C "$dest" checkout "$branch" >/dev/null 2>&1
         fi
+
         if git -C "$dest" pull --ff-only >/dev/null 2>&1; then
             print_green "  Updated $name"
         else
-            print_yellow "  Could not fast-forward $name (local changes?). Left as-is."
+            print_red "  Could not fast-forward $name: it keeps the code already on disk"
+            print_red "    inspect with: git -C $dest status"
+        fi
+
+        if [ "$stashed" -eq 1 ]; then
+            if git -C "$dest" stash pop -q >/dev/null 2>&1; then
+                print_green "  Restored local changes to $name"
+            else
+                git -C "$dest" reset -q
+                git -C "$dest" checkout -- . >/dev/null 2>&1
+                print_red "  Local changes to $name clash with the update; left stashed"
+                print_red "    recover with: git -C $dest stash list; git -C $dest stash pop"
+            fi
         fi
         return 0
     fi
@@ -1735,7 +1763,7 @@ clone_or_update() {
 }
 
 # Configs ship device_port: "can0"; follow the udev rename. Local edit --
-# a later `git pull` reverts it.
+# clone_or_update shelves it across a pull and puts it back.
 patch_device_port() {
     local cfgdir="$ROVER_ROS2_DIR/roverrobotics_driver/config"
     local patched=0
@@ -2694,6 +2722,17 @@ fi
 
 if [ "$install_udev" = true ]; then
     print_next_install "Installing the udev rules"
+
+    # the gamepad rules hand write access to plugdev so the input manager can drive
+    # the light bar and rumble; without the membership they grant nothing
+    if id -nG "$USER" | grep -qw plugdev; then
+        print_italic "$USER is already in plugdev"
+    elif sudo usermod -aG plugdev "$USER"; then
+        print_green "Added $USER to plugdev, for the controller light bar and rumble"
+        print_italic "  Takes effect when the services restart, or at your next login"
+    else
+        print_red "Could not add $USER to plugdev: the controller light bar and rumble will not work"
+    fi
 
     print_italic "Copying Udev rules into /etc/udev/rules.d/55-roverrobotics.rules"
     sudo cp "$BASEDIR/udev/55-roverrobotics.rules" /etc/udev/rules.d/55-roverrobotics.rules
