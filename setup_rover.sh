@@ -935,6 +935,15 @@ install_realsense_ros() {
     mkdir -p "$WORKSPACE_DIR/src"
     clone_or_update "$REALSENSE_ROS_REPO" "$REALSENSE_ROS_BRANCH" \
                     "$WORKSPACE_DIR/src/realsense-ros"
+
+    # A workspace build leaves the messages out of /opt, so anything that loads
+    # typesupport only from there cannot see the camera's services or actions.
+    if sudo apt-get install -y "ros-$ROS_DISTRO-realsense2-camera-msgs" >/dev/null 2>&1; then
+        print_green "  ros-$ROS_DISTRO-realsense2-camera-msgs installed system-wide"
+    else
+        print_yellow "  ros-$ROS_DISTRO-realsense2-camera-msgs unavailable; a client that reads"
+        print_yellow "  typesupport only from /opt will not see the camera's services"
+    fi
 }
 
 create_realsense_service() {

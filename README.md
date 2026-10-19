@@ -284,6 +284,13 @@ How it installs depends on the computer:
 
 Intel publishes no arm64 debs, which is why a Jetson has to build the SDK.
 
+On the workspace path, `ros-$ROS_DISTRO-realsense2-camera-msgs` is also installed
+from apt. A workspace build leaves the message libraries under
+`install/realsense2_camera_msgs/`, and a client that loads typesupport only from
+`/opt/ros/$ROS_DISTRO/lib` — a telemetry agent, for instance — cannot read them
+there, so the camera's services and actions are invisible to it. The apt path
+does not need this: `realsense2-camera` depends on the messages already.
+
 **Unplug the camera before the Jetson SDK build.** The installer says so and
 waits. Plug it back in afterwards.
 
