@@ -133,6 +133,7 @@ echo ""
 print_bold "Services"
 units=(roverrobotics.service rover-realsense.service realsense-watchdog.timer realsense-watchdog.service
        rover-ublox.service gps-watchdog.timer gps-watchdog.service lo-multicast.service
+       rover-zenohd.service
        rover-bno055.service imu-watchdog.timer imu-watchdog.service
        can-watchdog.timer can-watchdog.service can.service)
 for u in "${units[@]}"; do
@@ -154,6 +155,7 @@ remove_files /usr/sbin/roverrobotics /usr/sbin/enablecan /usr/sbin/can-watchdog 
              /usr/local/sbin/reset_realsense_usb.sh /usr/local/sbin/reset_bno055_usb.sh \
              /usr/sbin/gps-watchdog /usr/local/sbin/gps-probe /usr/local/sbin/rover-gps-active \
              /usr/local/sbin/reset_ublox_usb.sh /etc/cyclonedds/rover.xml \
+             /usr/sbin/rover-zenohd /etc/zenoh/rover_router.json5 /etc/zenoh/rover_session.json5 \
              /etc/sudoers.d/rover-realsense /etc/sudoers.d/rover-bno055 /etc/sudoers.d/rover-ublox \
              /etc/modules-load.d/gs_usb.conf /etc/apt/apt.conf.d/90rover-installer-lock-wait \
              "$HOME/rover_setup.log"
@@ -172,9 +174,17 @@ print_bold "Shell setup"
 remove_lines "$HOME/.bashrc" "source ~/$WORKSPACE_NAME/install/setup.bash" \
                              "source $WORKSPACE_DIR/install/setup.bash" \
                              "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" \
-                             "export CYCLONEDDS_URI=file:///etc/cyclonedds/rover.xml"
+                             "export CYCLONEDDS_URI=file:///etc/cyclonedds/rover.xml" \
+                             "export RMW_IMPLEMENTATION=rmw_zenoh_cpp" \
+                             "export ZENOH_SESSION_CONFIG_URI=/etc/zenoh/rover_session.json5" \
+                             "export ZENOH_ROUTER_CONFIG_URI=/etc/zenoh/rover_router.json5"
+# left behind, these point ROS at a middleware whose package has just been removed,
+# and then every ros2 command fails with "failed to load rmw implementation"
 remove_lines /etc/environment "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" \
-                              "CYCLONEDDS_URI=file:///etc/cyclonedds/rover.xml"
+                              "CYCLONEDDS_URI=file:///etc/cyclonedds/rover.xml" \
+                              "RMW_IMPLEMENTATION=rmw_zenoh_cpp" \
+                              "ZENOH_SESSION_CONFIG_URI=/etc/zenoh/rover_session.json5" \
+                              "ZENOH_ROUTER_CONFIG_URI=/etc/zenoh/rover_router.json5"
 # setup_rover.sh writes one ROS_DOMAIN_ID line in each
 mapfile -t domain_lines < <(grep -xE 'export ROS_DOMAIN_ID=[0-9]+' "$HOME/.bashrc" 2>/dev/null)
 [ ${#domain_lines[@]} -gt 0 ] && remove_lines "$HOME/.bashrc" "${domain_lines[@]}"

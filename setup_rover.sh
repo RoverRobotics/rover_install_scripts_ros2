@@ -184,9 +184,17 @@ Options:
       --with-rs-service  Start the camera at boot: rover-realsense.service,
                        USB reset, boot delay and a frame watchdog
                        (implies --with-realsense)
-      --with-cyclone   Use Cyclone DDS for ROS 2 (default: Fast DDS), set up so the
-                       robot keeps working when it loses the network: traffic on
-                       the robot goes over loopback, WiFi/Ethernet are optional
+      --rmw NAME       ROS 2 middleware: cyclone, fastdds or zenoh. Cyclone is the
+                       default on a Jetson, where Fast DDS has been seen to stop
+                       delivering messages shortly after start; Fast DDS is the
+                       default elsewhere. Cyclone and Zenoh are set up so the robot
+                       keeps working when it loses the network: traffic on the robot
+                       goes over loopback, WiFi/Ethernet are optional
+      --with-cyclone   Same as --rmw cyclone
+      --no-cyclone     Same as --rmw fastdds
+      --with-zenoh     Same as --rmw zenoh. EXPERIMENTAL and Jazzy only: it adds a
+                       rover-zenohd.service that every ROS node needs for discovery,
+                       and a Humble computer cannot exchange messages with it
       --domain-id N    ROS_DOMAIN_ID (0-101) for this computer: ~/.bashrc,
                        /etc/environment and every service. Default: keep the
                        one already in ~/.bashrc
@@ -224,12 +232,26 @@ ARG_GAMEPAD=""
 ARG_REALSENSE=""
 ARG_RS_SERVICE=""
 ARG_CAN=""
-ARG_CYCLONE=""
+ARG_RMW=""
 ARG_INSTALL_ROS=""
 ARG_JETPACK=""
 ARG_GPS=""
 ARG_DOMAIN=""
 ASSUME_YES=false
+
+# One middleware per run. Two different middleware flags in one command line is a
+# mistake, not a preference, and last-flag-wins would hide it.
+set_rmw_arg() {
+    case "$1" in
+        cyclone|fastdds|zenoh) ;;
+        *) print_red "--rmw must be cyclone, fastdds or zenoh (got '$1')"; exit 1 ;;
+    esac
+    if [ -n "$ARG_RMW" ] && [ "$ARG_RMW" != "$1" ]; then
+        print_red "Two middleware options in one command line: '$ARG_RMW' and '$1'. Pick one."
+        exit 1
+    fi
+    ARG_RMW="$1"
+}
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -245,11 +267,14 @@ while [ $# -gt 0 ]; do
         --with-service) ARG_SERVICE=true; shift ;;
         --with-can)    ARG_CAN=true; shift ;;
         --no-can)      ARG_CAN=false; shift ;;
-        --with-cyclone) ARG_CYCLONE=true; shift ;;
+        --with-cyclone) set_rmw_arg cyclone; shift ;;
         --install-ros) ARG_INSTALL_ROS=true; shift ;;
         --with-jetpack) ARG_JETPACK=true; shift ;;
         --no-jetpack)  ARG_JETPACK=false; shift ;;
-        --no-cyclone)  ARG_CYCLONE=false; shift ;;
+        --no-cyclone)  set_rmw_arg fastdds; shift ;;
+        --with-fastdds) set_rmw_arg fastdds; shift ;;
+        --with-zenoh)  set_rmw_arg zenoh; shift ;;
+        --rmw)         set_rmw_arg "${2:-}"; shift 2 ;;
         --with-gps)    ARG_GPS=true; shift ;;
         --domain-id)   ARG_DOMAIN="${2:-}"; shift 2 ;;
         --no-udev)     ARG_UDEV=false; shift ;;
@@ -423,7 +448,8 @@ install_summary() {
     local pad="${gamepad^^}"
     [ "$use_jp6" = true ] && pad="$pad, JetPack 6 map"
     local dds="Fast DDS"
-    [ "$install_cyclone" = true ] && dds="Cyclone DDS"
+    [ "$rmw_choice" = cyclone ] && dds="Cyclone DDS"
+    [ "$rmw_choice" = zenoh ]   && dds="Zenoh (experimental)"
     local rs; rs=$(yes_no "$install_realsense_opt")
     [ "$install_rs_service" = true ] && rs="yes, starts at boot with watchdog"
     echo "Platform:          $PLATFORM_DESC"
@@ -690,7 +716,10 @@ select_components() {
     install_rs_service=false
     install_s2=false
     install_udev=true
-    install_cyclone=false
+    # Fast DDS shared memory has been seen to stop delivering messages on JP6 and JP7
+    # Jetsons, which kills the gamepad, so Cyclone is the default where that was measured
+    rmw_choice=fastdds
+    [ "$IS_TEGRA" = true ] && rmw_choice=cyclone
     install_gps=false
 
     if [ "$ASSUME_YES" = true ]; then
@@ -705,8 +734,7 @@ select_components() {
                 "LIDAR"      "RPLIDAR S2 driver" OFF)
         [ "$ROS_DISTRO" = jazzy ] && \
             items+=("GPS" "u-blox GPS driver + service; switch on in accessories.yaml" OFF)
-        items+=("UDEV"       "Udev rules for sensors and serial rovers" ON
-                "CYCLONE"    "Cyclone DDS; robot keeps working when it loses the network" OFF)
+        items+=("UDEV"       "Udev rules for sensors and serial rovers" ON)
         local choices
         choices=$(whiptail --backtitle "$WT_BACK" --title "Step 3 of 4 · Components" --checklist \
             "Choose what to set up. Space selects, Enter confirms.\nEach item installs its own services and watchdogs." \
@@ -724,9 +752,34 @@ select_components() {
                 LIDAR)      install_s2=true ;;
                 GPS)        install_gps=true ;;
                 UDEV)       install_udev=true ;;
-                CYCLONE)    install_cyclone=true ;;
             esac
         done
+
+        # a radiolist of its own, not a checklist entry: exactly one middleware can be
+        # chosen, where a checklist let two be ticked and silently kept the last one
+        local rmw_items=(
+            "CYCLONE"  "Cyclone DDS; robot keeps working when it loses the network" OFF
+            "FASTDDS"  "Fast DDS, the ROS 2 default" OFF)
+        [ "$ROS_DISTRO" = jazzy ] && \
+            rmw_items+=("ZENOH" "Zenoh; EXPERIMENTAL, adds a router service" OFF)
+        local i
+        for ((i=0; i<${#rmw_items[@]}; i+=3)); do
+            case "${rmw_items[i]}" in
+                CYCLONE) [ "$rmw_choice" = cyclone ] && rmw_items[i+2]=ON ;;
+                FASTDDS) [ "$rmw_choice" = fastdds ] && rmw_items[i+2]=ON ;;
+                ZENOH)   [ "$rmw_choice" = zenoh ]   && rmw_items[i+2]=ON ;;
+            esac
+        done
+        local rmw_pick
+        rmw_pick=$(whiptail --backtitle "$WT_BACK" --title "Step 3b of 4 · ROS 2 middleware" --radiolist \
+            "Which middleware should ROS 2 use?\nCyclone is preselected on a Jetson: Fast DDS has been seen to stop\ndelivering messages there, which kills the gamepad." \
+            15 78 3 "${rmw_items[@]}" 3>&1 1>&2 2>&3) \
+            || { echo "Cancelled. Nothing was changed."; exit 0; }
+        case "${rmw_pick//\"/}" in
+            CYCLONE) rmw_choice=cyclone ;;
+            FASTDDS) rmw_choice=fastdds ;;
+            ZENOH)   rmw_choice=zenoh ;;
+        esac
     else
         ask_yes_no "Start the driver automatically at boot?" no install_service
         [ "$is_can_robot" = true ] && \
@@ -739,7 +792,20 @@ select_components() {
         [ "$ROS_DISTRO" = jazzy ] && \
             ask_yes_no "Install the u-blox GPS driver and service? It stays off until you set\nactive: true under ublox_gps_node in accessories.yaml." no install_gps
         ask_yes_no "Install the udev rules?" yes install_udev
-        ask_yes_no "Use Cyclone DDS instead of the default Fast DDS?\nIt is set up so the robot keeps working when it loses the network." no install_cyclone
+        local rmw_answer rmw_prompt
+        rmw_prompt="Which ROS 2 middleware? cyclone, fastdds"
+        [ "$ROS_DISTRO" = jazzy ] && rmw_prompt="$rmw_prompt or zenoh (experimental)"
+        while :; do
+            printf '%s [%s]: ' "$rmw_prompt" "$rmw_choice"
+            read -r rmw_answer || rmw_answer=""
+            [ -z "$rmw_answer" ] && break
+            case "$rmw_answer" in
+                cyclone|fastdds) rmw_choice="$rmw_answer"; break ;;
+                zenoh) if [ "$ROS_DISTRO" = jazzy ]; then rmw_choice=zenoh; break
+                       else echo "Zenoh is offered on Jazzy only."; fi ;;
+                *) echo "Please answer cyclone, fastdds or zenoh." ;;
+            esac
+        done
     fi
 
     # command-line flags win over the menu
@@ -750,12 +816,19 @@ select_components() {
     [ -n "$ARG_RS_SERVICE" ] && install_rs_service="$ARG_RS_SERVICE"
     [ -n "$ARG_LIDAR" ]      && install_s2="$ARG_LIDAR"
     [ -n "$ARG_UDEV" ]       && install_udev="$ARG_UDEV"
-    [ -n "$ARG_CYCLONE" ]    && install_cyclone="$ARG_CYCLONE"
+    [ -n "$ARG_RMW" ]        && rmw_choice="$ARG_RMW"
     [ -n "$ARG_GPS" ]        && install_gps="$ARG_GPS"
 
     if [ "$install_gps" = true ] && [ "$ROS_DISTRO" != jazzy ]; then
         print_yellow "GPS support is available on the Jazzy branch only; skipping it on $ROS_DISTRO."
         install_gps=false
+    fi
+
+    # upstream ships Humble binaries but says it does not test them, and a Humble node
+    # and a Jazzy node discover each other and then drop every message between them
+    if [ "$rmw_choice" = zenoh ] && [ "$ROS_DISTRO" != jazzy ]; then
+        print_yellow "Zenoh is offered on the Jazzy branch only; using Cyclone DDS on $ROS_DISTRO."
+        rmw_choice=cyclone
     fi
 
     [ "$is_can_robot" = true ] || install_can=false
@@ -1067,7 +1140,7 @@ now=$(cut -d. -f1 /proc/uptime)
 export HOME=RUN_HOME_PLACEHOLDER
 # probe with the unit's own ROS env
 for kv in $(systemctl show "$UNIT" -p Environment --value); do
-    case "$kv" in ROS_*|RMW_*|CYCLONEDDS_*) export "$kv" ;; esac
+    case "$kv" in ROS_*|RMW_*|CYCLONEDDS_*|ZENOH_*) export "$kv" ;; esac
 done
 source /opt/ros/ROS_DISTRO_PLACEHOLDER/setup.bash >/dev/null 2>&1
 source WORKSPACE_PLACEHOLDER/install/setup.bash   >/dev/null 2>&1
@@ -1319,7 +1392,7 @@ now=$(cut -d. -f1 /proc/uptime)
 export HOME=RUN_HOME_PLACEHOLDER
 # probe with the unit's own ROS env
 for kv in $(systemctl show "$UNIT" -p Environment --value); do
-    case "$kv" in ROS_*|RMW_*|CYCLONEDDS_*) export "$kv" ;; esac
+    case "$kv" in ROS_*|RMW_*|CYCLONEDDS_*|ZENOH_*) export "$kv" ;; esac
 done
 source /opt/ros/ROS_DISTRO_PLACEHOLDER/setup.bash >/dev/null 2>&1
 source WORKSPACE_PLACEHOLDER/install/setup.bash   >/dev/null 2>&1
@@ -1422,9 +1495,17 @@ setup_domain_id() {
 # Same DDS and domain in every service, or their nodes cannot see each other
 add_ros_env() {
     local unit="$1"
-    if [ "$install_cyclone" = true ]; then
+    if [ "$rmw_choice" = cyclone ]; then
         sudo sed -i "/^Environment=HOME=/a Environment=CYCLONEDDS_URI=file://$CYCLONE_XML" "$unit"
         sudo sed -i '/^Environment=HOME=/a Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp' "$unit"
+    elif [ "$rmw_choice" = zenoh ]; then
+        sudo sed -i "/^Environment=HOME=/a Environment=ZENOH_SESSION_CONFIG_URI=$ZENOH_SESSION_JSON" "$unit"
+        # wait for the router instead of starting blind: a node that wins the race warns
+        # once, runs, and then only finds the rest of the graph if gossip reaches it
+        sudo sed -i "/^Environment=HOME=/a Environment=ZENOH_ROUTER_CHECK_ATTEMPTS=$ZENOH_ROUTER_WAIT" "$unit"
+        sudo sed -i '/^Environment=HOME=/a Environment=RMW_IMPLEMENTATION=rmw_zenoh_cpp' "$unit"
+        # no router, no discovery, so every unit is ordered after it
+        sudo sed -i '/^Description=/a After=rover-zenohd.service\nWants=rover-zenohd.service' "$unit"
     fi
     [ -n "$ros_domain_id" ] && \
         sudo sed -i "/^Environment=HOME=/a Environment=ROS_DOMAIN_ID=$ros_domain_id" "$unit"
@@ -1584,7 +1665,7 @@ now=$(cut -d. -f1 /proc/uptime)
 export HOME=RUN_HOME_PLACEHOLDER
 # probe with the unit's own ROS env
 for kv in $(systemctl show "$UNIT" -p Environment --value); do
-    case "$kv" in ROS_*|RMW_*|CYCLONEDDS_*) export "$kv" ;; esac
+    case "$kv" in ROS_*|RMW_*|CYCLONEDDS_*|ZENOH_*) export "$kv" ;; esac
 done
 source /opt/ros/ROS_DISTRO_PLACEHOLDER/setup.bash >/dev/null 2>&1
 source WORKSPACE_PLACEHOLDER/install/setup.bash   >/dev/null 2>&1
@@ -1627,6 +1708,11 @@ EOF_GPSWDTMR
 }
 
 CYCLONE_XML=/etc/cyclonedds/rover.xml
+ZENOH_DIR=/etc/zenoh
+ZENOH_SESSION_JSON=$ZENOH_DIR/rover_session.json5
+ZENOH_ROUTER_JSON=$ZENOH_DIR/rover_router.json5
+# how long a node waits for the router at startup, one attempt a second
+ZENOH_ROUTER_WAIT=30
 
 # The robot's real network ports: WiFi and Ethernet with a device behind them, not
 # bridges, Docker, CAN or the Jetson's USB gadget ports (usb0/usb1)
@@ -1686,19 +1772,122 @@ EOF_LOMC
     sudo systemctl enable --now lo-multicast.service >/dev/null 2>&1
 }
 
+# One middleware's variables in ~/.bashrc and /etc/environment, and never two.
+# A `grep -q "^RMW_IMPLEMENTATION="` guard read any existing value as "already done",
+# so a second run with a different middleware left the two files disagreeing, and
+# switching back to Fast DDS never removed anything.
+clear_rmw_env() {
+    sed -i '/^export RMW_IMPLEMENTATION=/d;/^export CYCLONEDDS_URI=/d' ~/.bashrc 2>/dev/null
+    sed -i '/^export ZENOH_SESSION_CONFIG_URI=/d;/^export ZENOH_ROUTER_CONFIG_URI=/d' ~/.bashrc 2>/dev/null
+    sudo sed -i '/^RMW_IMPLEMENTATION=/d;/^CYCLONEDDS_URI=/d' /etc/environment
+    sudo sed -i '/^ZENOH_SESSION_CONFIG_URI=/d;/^ZENOH_ROUTER_CONFIG_URI=/d' /etc/environment
+}
+
+# /etc/environment is read by PAM and ~/.bashrc only by interactive shells, so both
+# are written; the services get theirs from add_ros_env
+set_rmw_env() {
+    local shell_lines=("$@")
+    local line
+    clear_rmw_env
+    for line in "${shell_lines[@]}"; do
+        echo "export $line" >> ~/.bashrc
+        echo "$line" | sudo tee -a /etc/environment >/dev/null
+    done
+    ros2 daemon stop >/dev/null 2>&1
+}
+
+# Cyclone writes a loopback config and needs multicast on lo; the other two do not,
+# so a switch away from Cyclone takes that unit back off the robot
+drop_lo_multicast() {
+    [ -f /etc/systemd/system/lo-multicast.service ] || return 0
+    sudo systemctl disable --now lo-multicast.service >/dev/null 2>&1
+    sudo rm -f /etc/systemd/system/lo-multicast.service
+    sudo systemctl daemon-reload
+}
+
 setup_cyclone() {
     try_install_package "ros-$ROS_DISTRO-rmw-cyclonedds-cpp" || return 1
     write_cyclone_config
     # every login shell and every service must agree, or nodes do not see each other
-    grep -Fqx "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" ~/.bashrc 2>/dev/null ||
-        echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" >> ~/.bashrc
-    grep -Fqx "export CYCLONEDDS_URI=file://$CYCLONE_XML" ~/.bashrc 2>/dev/null ||
-        echo "export CYCLONEDDS_URI=file://$CYCLONE_XML" >> ~/.bashrc
-    grep -q "^RMW_IMPLEMENTATION=" /etc/environment 2>/dev/null ||
-        echo "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" | sudo tee -a /etc/environment >/dev/null
-    grep -q "^CYCLONEDDS_URI=" /etc/environment 2>/dev/null ||
-        echo "CYCLONEDDS_URI=file://$CYCLONE_XML" | sudo tee -a /etc/environment >/dev/null
+    set_rmw_env "RMW_IMPLEMENTATION=rmw_cyclonedds_cpp" "CYCLONEDDS_URI=file://$CYCLONE_XML"
+    return 0
+}
+
+setup_fastdds() {
+    drop_lo_multicast
+    # back to the ROS 2 default, which is what an unset RMW_IMPLEMENTATION means
+    clear_rmw_env
     ros2 daemon stop >/dev/null 2>&1
+    return 0
+}
+
+# The shipped defaults already keep a node's own traffic on loopback, which is what
+# /etc/cyclonedds/rover.xml had to be written to achieve. Two things are not left to
+# them: the stock router listens on IPv6 ANY and dies on a box with IPv6 off, and
+# "localhost" would make discovery depend on /etc/hosts resolving at boot.
+write_zenoh_config() {
+    sudo mkdir -p "$ZENOH_DIR"
+    {
+        echo '{'
+        echo '  mode: "router",'
+        echo '  listen: { endpoints: ["tcp/127.0.0.1:7447"] },'
+        echo '  connect: { endpoints: [] },'
+        echo '  scouting: { multicast: { enabled: false }, gossip: { enabled: true } },'
+        echo '}'
+    } | sudo tee "$ZENOH_ROUTER_JSON" >/dev/null
+    {
+        echo '{'
+        echo '  mode: "peer",'
+        echo '  connect: { endpoints: ["tcp/127.0.0.1:7447"] },'
+        echo '  listen: { endpoints: ["tcp/127.0.0.1:0"] },'
+        echo '  scouting: { multicast: { enabled: false }, gossip: { enabled: true } },'
+        echo '}'
+    } | sudo tee "$ZENOH_SESSION_JSON" >/dev/null
+}
+
+# rmw_zenohd has no RPATH and finds its own share directory through the ament index,
+# so it has to start from a shell that sourced the ROS setup, like the driver wrapper
+create_zenohd_service() {
+    cat << EOF_ZENOHD | sudo tee /usr/sbin/rover-zenohd >/dev/null
+#!/bin/bash
+source /opt/ros/$ROS_DISTRO/setup.bash
+export ZENOH_ROUTER_CONFIG_URI=$ZENOH_ROUTER_JSON
+exec ros2 run rmw_zenoh_cpp rmw_zenohd
+EOF_ZENOHD
+    sudo chmod +x /usr/sbin/rover-zenohd
+
+    cat << EOF_ZENOHDSVC | sudo tee /etc/systemd/system/rover-zenohd.service >/dev/null
+[Unit]
+Description=Zenoh router for ROS 2 on this computer
+# every ROS node needs it to discover the others, so it comes up first
+Before=roverrobotics.service rover-realsense.service rover-ublox.service rover-bno055.service
+After=local-fs.target
+# no burst cap; RestartSec below is the backoff
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=$USER
+Environment=HOME=$HOME
+ExecStart=/bin/bash /usr/sbin/rover-zenohd
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF_ZENOHDSVC
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now rover-zenohd.service >/dev/null 2>&1
+}
+
+setup_zenoh() {
+    try_install_package "ros-$ROS_DISTRO-rmw-zenoh-cpp" || return 1
+    drop_lo_multicast
+    write_zenoh_config
+    create_zenohd_service
+    set_rmw_env "RMW_IMPLEMENTATION=rmw_zenoh_cpp" \
+                "ZENOH_SESSION_CONFIG_URI=$ZENOH_SESSION_JSON" \
+                "ZENOH_ROUTER_CONFIG_URI=$ZENOH_ROUTER_JSON"
     return 0
 }
 
@@ -2441,7 +2630,7 @@ install_total=2
 [ "$install_realsense_opt" = true ] && install_total=$((install_total+1))
 [ "$install_rs_service" = true ]    && install_total=$((install_total+1))
 [ "$install_can" = true ]           && install_total=$((install_total+1))
-[ "$install_cyclone" = true ]       && install_total=$((install_total+1))
+[ "$rmw_choice" != fastdds ]        && install_total=$((install_total+1))
 [ "$install_jetpack" = true ]       && install_total=$((install_total+1))
 [ -n "$ros_domain_id" ]             && install_total=$((install_total+1))
 [ "$install_gps" = true ]           && install_total=$((install_total+2))
@@ -2469,16 +2658,43 @@ print_next_install "Checking/Installing dependent packages"
 install_ros_packages
 echo ""
 
-if [ "$install_cyclone" = true ]; then
+if [ "$rmw_choice" = cyclone ]; then
     print_next_install "Switching ROS 2 to Cyclone DDS"
     if setup_cyclone; then
         print_green "Cyclone DDS set in ~/.bashrc, /etc/environment and the services"
         print_green "Network ports for ROS from other computers: $(network_interfaces | tr '\n' ' ')(optional; loopback carries the robot's own traffic)"
     else
-        print_red "Could not install ros-$ROS_DISTRO-rmw-cyclonedds-cpp; staying on Fast DDS"
-        install_cyclone=false
+        rmw_choice=fastdds
+        print_red "Could not install ros-$ROS_DISTRO-rmw-cyclonedds-cpp, so this computer stays on Fast DDS."
+        if [ "$IS_TEGRA" = true ]; then
+            # not a quiet fallback: this is the combination that killed the gamepad
+            print_red "On a Jetson that is the middleware we have measured dropping messages a"
+            print_red "few seconds after start, which takes the gamepad with it. Fix the apt"
+            print_red "source and re-run with --rmw cyclone before driving this robot."
+        fi
     fi
     echo ""
+elif [ "$rmw_choice" = zenoh ]; then
+    print_next_install "Switching ROS 2 to Zenoh (experimental)"
+    if setup_zenoh; then
+        print_green "Zenoh set in ~/.bashrc, /etc/environment and the services"
+        print_green "rover-zenohd.service is the router every ROS node on this computer discovers through"
+        print_yellow "The router listens on 127.0.0.1:7447 only, so another computer cannot see"
+        print_yellow "these topics; and a Humble computer cannot exchange messages with Zenoh on Jazzy."
+    else
+        print_red "Could not install ros-$ROS_DISTRO-rmw-zenoh-cpp; falling back to Cyclone DDS"
+        rmw_choice=cyclone
+        if setup_cyclone; then
+            print_green "Cyclone DDS set in ~/.bashrc, /etc/environment and the services"
+        else
+            rmw_choice=fastdds
+            print_red "Could not install Cyclone DDS either; this computer stays on Fast DDS"
+        fi
+    fi
+    echo ""
+else
+    # chosen Fast DDS, or fell back to it: clear anything a previous run left behind
+    setup_fastdds
 fi
 
 if [ -n "$ros_domain_id" ]; then
@@ -2843,8 +3059,16 @@ echo "      systemctl status rover-realsense.service"
 echo "      journalctl -u realsense-watchdog.service"
 echo ""
 fi
-if [ "$install_cyclone" = true ]; then
+if [ "$rmw_choice" = cyclone ]; then
 echo "  ROS 2 now uses Cyclone DDS. Open a new terminal before running ros2 commands."
+echo ""
+fi
+if [ "$rmw_choice" = zenoh ]; then
+echo "  ROS 2 now uses Zenoh, which is EXPERIMENTAL here. Open a new terminal before"
+echo "  running ros2 commands, and check the router first:"
+echo "      systemctl status rover-zenohd.service"
+echo "      ros2 daemon stop                        # the daemon caches the old middleware"
+echo "  Do not start a second router by hand: it cannot bind port 7447 and exits."
 echo ""
 fi
 if [ -n "$ros_domain_id" ]; then

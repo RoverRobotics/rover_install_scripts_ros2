@@ -168,7 +168,7 @@ and watchdogs, and nothing it does not.
 | **RPLIDAR S2** | off | the lidar driver |
 | **u-blox GPS** (Jazzy only) | off | the u-blox GPS driver and `rover-ublox.service`, with a data watchdog. The GPS stays off until you switch it on; see [GPS](#gps-jazzy-only) |
 | **Udev rules** | on | stable `/dev` names for the ESCs, IMU, lidar and GPS |
-| **Cyclone DDS** | off | switches ROS 2 from Fast DDS to Cyclone DDS, set up so the robot keeps working when it loses the network; see [Cyclone DDS](#cyclone-dds-and-losing-the-network). Recommended on Jetsons, where Fast DDS has been seen to stop delivering messages shortly after start |
+| **ROS 2 middleware** | Cyclone DDS on a Jetson, Fast DDS elsewhere | `cyclone`, `fastdds` or `zenoh`. Cyclone is set up so the robot keeps working when it loses the network; see [Cyclone DDS](#cyclone-dds-and-losing-the-network). It is the default on a Jetson, where Fast DDS has been seen to stop delivering messages shortly after start. Zenoh is **experimental** and offered on Jazzy only; see [Zenoh](#zenoh-experimental) |
 
 The installer also asks for a **ROS_DOMAIN_ID**; see [ROS domain](#ros-domain).
 
@@ -229,6 +229,47 @@ cannot see the robot's topics until it is restarted
 
 Re-run the installer after adding a network port, such as a USB WiFi adapter, so
 it is added to the file.
+
+### Zenoh (experimental)
+
+Zenoh is a third middleware, offered with `--rmw zenoh` on **Jazzy only**. It is
+**experimental here**: no robot in regular use runs it, and the notes below are the
+reasons to be careful with it rather than cautions for their own sake.
+
+**What the Zenoh option sets up:**
+
+- `ros-<distro>-rmw-zenoh-cpp`, and `RMW_IMPLEMENTATION=rmw_zenoh_cpp` in
+  `~/.bashrc`, `/etc/environment` and every service.
+- `rover-zenohd.service`, a **router** on `127.0.0.1:7447`. Zenoh turns multicast
+  discovery off by default, so without the router no ROS program finds another one.
+  Every service is ordered after it, and each one waits up to 30 seconds for it.
+- `/etc/zenoh/rover_router.json5` and `/etc/zenoh/rover_session.json5`, which keep
+  the robot's own traffic on loopback. Zenoh does this out of the box, so there is
+  no equivalent of `rover.xml` to write and **no `lo-multicast.service`**: it is
+  plain TCP to `127.0.0.1`, not multicast.
+- The address is written as `127.0.0.1`, not `localhost`, for two reasons: the
+  stock router listens on IPv6 ANY and exits with
+  `Address family not supported by protocol` on a computer with IPv6 switched off,
+  and a name would make discovery depend on `/etc/hosts` resolving at boot.
+
+**What it costs, and these are the reasons it is not the default:**
+
+- **Another computer cannot see the robot's topics.** The router listens on
+  loopback only. Opening it to the network means `0.0.0.0:7447` with no
+  authentication, which is a control port anyone on the same network can reach.
+  The Cyclone option gets laptop visibility without that.
+- **A Humble computer and a Jazzy computer cannot talk over Zenoh.** They discover
+  each other and then every message is dropped, because the type hash is part of
+  the key each side publishes under. There is no setting that fixes it.
+- **One router per computer.** A second one cannot take port 7447 and exits, so do
+  not start one by hand while the service is running.
+- Upstream publishes Humble binaries but states it does not test them, which is
+  why this installer offers Zenoh on Jazzy only.
+
+Before putting Zenoh on a robot that reports to a cloud service, check that the
+cloud agent can speak it too: the agent is a separate program with its own ROS
+runtime, and if it only has Fast DDS then every check on the robot passes while
+the cloud sees nothing.
 
 ### GPS (Jazzy only)
 
@@ -385,7 +426,10 @@ ticked by default. See [CAN interface naming](#can-interface-naming) below.
     --with-realsense Intel RealSense SDK and ROS wrapper
     --no-realsense   Skip RealSense without being asked
     --with-rs-service  Start the camera at boot, with watchdog (implies --with-realsense)
-    --with-cyclone   Use Cyclone DDS (default: Fast DDS), set up so the robot
+    --rmw NAME       ROS 2 middleware: cyclone (default on a Jetson), fastdds
+                     or zenoh (experimental, Jazzy only). --with-cyclone,
+                     --no-cyclone and --with-zenoh are kept as aliases
+    --with-cyclone   Use Cyclone DDS, set up so the robot
                      keeps working when it loses the network
     --domain-id N    ROS_DOMAIN_ID 0-101 (default: keep the one in ~/.bashrc)
     --with-gps       u-blox GPS driver and service (Jazzy only)
@@ -466,6 +510,9 @@ which mode it settled on.
 | `/usr/sbin/imu-watchdog` + `.service` + `.timer`, `/usr/local/sbin/imu-probe` | Restarts the IMU if `/imu/data` stops, and reports when only removing the sensor's power can help | `setup_rover.sh` (IMU) |
 | `/var/log/rover-imu-events.log` | One line per IMU escalation and recovery, kept so the record outlives a power cycle | `imu-watchdog` |
 | `/etc/environment`, `~/.bashrc` | `RMW_IMPLEMENTATION`, `CYCLONEDDS_URI` | `setup_rover.sh` (Cyclone DDS) |
+| `/etc/environment`, `~/.bashrc` | `RMW_IMPLEMENTATION`, `ZENOH_SESSION_CONFIG_URI`, `ZENOH_ROUTER_CONFIG_URI` | `setup_rover.sh` (Zenoh) |
+| `/etc/zenoh/rover_router.json5`, `/etc/zenoh/rover_session.json5` | Router and node settings, loopback only | `setup_rover.sh` (Zenoh) |
+| `/etc/systemd/system/rover-zenohd.service`, `/usr/sbin/rover-zenohd` | The Zenoh router every ROS node discovers through | `setup_rover.sh` (Zenoh) |
 | `/etc/cyclonedds/rover.xml` | Loopback for the robot's own traffic, network ports optional | `setup_rover.sh` (Cyclone DDS) |
 | `/etc/systemd/system/lo-multicast.service` | Multicast on loopback at boot | `setup_rover.sh` (Cyclone DDS) |
 | `/etc/environment`, `~/.bashrc` | `ROS_DOMAIN_ID` | `setup_rover.sh` (ROS domain) |
@@ -564,7 +611,9 @@ journalctl -u roverrobotics.service -f
 | Camera node starts then dies repeatedly | D435i USB enumeration failure | `rover-realsense.service` power-cycles it each start; check `journalctl -u rover-realsense` |
 | `librealsense2` has no install candidate | Intel publishes no build for this Ubuntu release | Build from source, or use a release Intel supports |
 | Sensor installed but no topics | `active: false` in `accessories.yaml` | Set `active: true` for that sensor and rebuild |
-| Controller and robot stop when the robot leaves the WiFi, recover when it is back | ROS traffic tied to the WiFi address (`ddsi_udp_conn_write ... failed` in the log) | Re-run with `--with-cyclone`; see [Cyclone DDS](#cyclone-dds-and-losing-the-network) |
+| Controller and robot stop when the robot leaves the WiFi, recover when it is back | ROS traffic tied to the WiFi address (`ddsi_udp_conn_write ... failed` in the log) | Re-run with `--rmw cyclone`; see [Cyclone DDS](#cyclone-dds-and-losing-the-network) |
+| On Zenoh: every node starts but no node sees another | the router is not running | `systemctl status rover-zenohd`, then `ros2 daemon stop` and try again |
+| On Zenoh: topics are listed but no messages arrive | one computer is on Humble and the other on Jazzy | not fixable in configuration - put both on the same ROS 2 version, or use Cyclone |
 | A laptop cannot see the robot's topics | Different `ROS_DOMAIN_ID` or DDS on the laptop, or the robot software started with no network | Use the robot's domain and the same DDS; restart `roverrobotics` after the network is up |
 | `rover-ublox` shows "skipped" | GPS switched off | Expected; set `active: true` under `ublox_gps_node` to switch it on |
 | `rover-ublox: /dev/ublox-gps not found` | Receiver unplugged or not a `1546:01a9` u-blox | Plug it in; it starts by itself. For another receiver, add its ID to the udev rules |
