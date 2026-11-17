@@ -587,6 +587,11 @@ journalctl -u roverrobotics.service -f
 
 ## Troubleshooting
 
+For CAN faults specifically, [docs/CAN_Diagnostics.md](docs/CAN_Diagnostics.md) is the
+full procedure: what to check before touching the robot, the commands with the output a
+healthy robot prints, how to tell a wrong bitrate from a dead bus, and which counters
+and log lines are misleading.
+
 | Symptom | Likely cause | What to do |
 |---|---|---|
 | `rovercan` does not exist | udev rename has not run since the adapter was plugged in | Unplug/replug the adapter, or reboot |
