@@ -432,8 +432,7 @@ Sample twice and diff, as in section 5. Dropped received frames are normally a s
 burst: on one robot the count sat frozen at 4,850 while received frames climbed from
 35,363 to 41,527 over twenty seconds. Only a rising count is a fault.
 
-**`LOWER_UP` does not mean the VESCs are acknowledging.** An older version of our setup
-guide says it does. That is wrong and we are correcting it. A CAN interface shows
+**`LOWER_UP` does not mean the VESCs are acknowledging.** A CAN interface shows
 `LOWER_UP` with nothing else on the bus, and an adapter can read `UP`, `LOWER_UP` and
 `ERROR-ACTIVE` at the right bitrate with its CAN core completely dead.
 
