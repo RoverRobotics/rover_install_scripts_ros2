@@ -61,6 +61,12 @@ counters sampled twice with a diff, three seconds of bus traffic, service and re
 counts, CAN-relevant `dmesg`, and three journals. Plain text with `#####` markers, so it
 also feeds an analysis tool. It contains hostnames and file paths.
 
+Send the VESC Tool side with it: the fault log and CAN settings for each controller,
+the firmware version of each, and photographs of the CAN wiring showing where the two
+terminators sit. Tell us the wall-clock time the fault occurred and what the robot was
+doing, because the journal and the CAN counters both reset on reboot, so timestamps are
+what let us line things up.
+
 Older installs stop after loopback and write no log. `grep -c STAGE
 /usr/sbin/can-selftest` returning zero means the older version; sections 4 and 5 are the
 manual equivalents, and re-running `setup_rover.sh` reinstalls the current script.
@@ -373,28 +379,3 @@ launch file is configured. Read `journalctl -u roverrobotics.service`.
 | Speed under-reads below walking pace | Hall Interpolation ERPM left at the factory 500 instead of 50 |
 | Interface `UP`, `ERROR-ACTIVE`, 0 errors, no data, forever | Driver bound to an onboard `mttcan` controller instead of the USB adapter |
 
----
-
-## 10. What to send us
-
-The `can-selftest` log from section 2 is the whole bundle in one file. If you are on the
-older script, this is the equivalent, captured while the fault is present if possible:
-
-    uname -r; modinfo -n gs_usb; dpkg -S $(modinfo -n gs_usb) 2>&1 | tail -1
-    lsusb; lsusb -t
-    sudo dmesg -T | grep -iE 'gs_usb|mttcan|rovercan|usb disconnect|EPIPE' | tail -60
-    ip -details -statistics link show rovercan          # twice, 6 seconds apart
-    readlink -f /sys/class/net/rovercan/device/driver
-    timeout 5 candump -ta rovercan > /tmp/candump.txt   # with the driver running
-    ps -eo args | grep '[r]overrobotics_driver/roverrobotics_driver'
-    systemctl show -p NRestarts roverrobotics.service can.service
-    systemctl status can.service can-watchdog.timer roverrobotics.service --no-pager
-    journalctl -u roverrobotics.service -u can.service -u can-watchdog -b --no-pager
-    journalctl --list-boots
-
-Plus, from VESC Tool, the fault log and CAN settings for each controller, the firmware
-version of each, and photographs of the CAN wiring showing where the two terminators
-sit.
-
-Tell us the wall-clock time the fault occurred and what the robot was doing. The journal
-and the CAN counters both reset on reboot, so timestamps are what let us line things up.
