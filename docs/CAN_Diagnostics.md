@@ -4,8 +4,8 @@ Rover Robotics. For rovers that drive four VESC motor controllers over a USB-CAN
 adapter on SocketCAN, running the `roverrobotics` ROS 2 driver. Covers MITI, Mini,
 MAX and Mega.
 
-This is the procedure we use on our own fleet, in the order we use it. The expected
-outputs below were measured on an AGX Orin MITI on 17 November 2026.
+This is the procedure for our own fleet, in the order to work through it. The expected
+outputs below come from a healthy AGX Orin MITI.
 
 Read section 1 first. Two of the obvious things to try destroy the evidence needed to
 find the cause.
@@ -164,8 +164,7 @@ loopback deliberately takes the bus out of the picture. Use (c) for that.
     sudo systemctl restart can.service && sudo systemctl start roverrobotics.service
 
 Listen-only never transmits and never acknowledges, so it cannot disturb the bus or any
-autonomy stack. We confirmed on 17 November that this mode works on the adapter fitted
-to these robots.
+autonomy stack. The adapters fitted to these robots support the mode.
 
 With the driver stopped the four VESCs still broadcast on their own, so you should see
 `00000901` through `00000904`. All four present means the adapter, wiring, termination
@@ -204,7 +203,7 @@ version, and sections 3c and 6 below are the manual equivalents. Re-running
 
 ## 5. Manual checks, with what a healthy robot prints
 
-Run these in order. Real output from a healthy AGX Orin MITI follows each one.
+Run these in order. The output from a healthy AGX Orin MITI follows each one.
 
 **Adapter present on USB**
 
@@ -299,8 +298,8 @@ at about 50 Hz. `0x1B01`-`0x1B04` are status 5. `0x1001` is status 4 and comes f
 VESC 1 only, which is correct, not a fault. Roughly 840 frames per second in total.
 
 Any whole multiple of 99 Hz on the command IDs means more than one driver instance is
-running. We once had thirteen, which saturated the bus and dropped status frames
-unevenly. Count them with
+running. Each extra instance adds its own command stream, and enough of them saturate
+the bus and drop status frames unevenly. Count them with
 `ps -eo args | grep -c '[r]overrobotics_driver/roverrobotics_driver'`.
 
 **Services**
@@ -336,7 +335,7 @@ them and stays passive throughout.
     done
     sudo systemctl restart can.service && sudo systemctl start roverrobotics.service
 
-On a healthy robot deliberately misconfigured to 250000, this printed:
+On a healthy robot with the computer deliberately set to 250000, the sweep prints:
 
     125000: 0
     250000: 0
@@ -405,10 +404,10 @@ Our fleet standard is status 1 and 5 on all four, status 4 on VESC 1 only, and H
 Interpolation ERPM set to 50. That last value cannot be read over CAN; left at the
 factory 500 it halves reported speed below 500 eRPM.
 
-Also read Motor Current Max, Battery Current Max and Absolute Max. We measured 19 to
-27.7 A per wheel during a direction reversal, roughly 100 A at the pack momentarily. If
-your limits sit below that, a controller faults and drops off the bus under load, which
-presents as an intermittent CAN disconnection that only happens while driving.
+Also read Motor Current Max, Battery Current Max and Absolute Max. A direction reversal
+draws 19 to 27.7 A per wheel, roughly 100 A at the pack momentarily. If your limits sit
+below that, a controller faults and drops off the bus under load, which presents as an
+intermittent CAN disconnection that only happens while driving.
 
 While you are in there, set a Timeout Brake Current on each controller. Without it the
 VESCs coast on their last command if the driver dies abruptly, instead of braking.
@@ -435,9 +434,8 @@ burst: on one robot the count sat frozen at 4,850 while received frames climbed 
 
 **`LOWER_UP` does not mean the VESCs are acknowledging.** An older version of our setup
 guide says it does. That is wrong and we are correcting it. A CAN interface shows
-`LOWER_UP` with nothing else on the bus, and we have a measured case of an adapter
-reading `UP`, `LOWER_UP` and `ERROR-ACTIVE` at the right bitrate with its CAN core
-completely dead.
+`LOWER_UP` with nothing else on the bus, and an adapter can read `UP`, `LOWER_UP` and
+`ERROR-ACTIVE` at the right bitrate with its CAN core completely dead.
 
 **An interface that looks perfect may be the wrong interface.** These boards have
 onboard CAN controllers, `can1` and `can2` in the output above. One with nothing wired
@@ -474,9 +472,9 @@ launch file is configured. Read `journalctl -u roverrobotics.service`.
 
 ---
 
-## 10. Signatures we have seen before
+## 10. Known signatures
 
-| What you see | What it was |
+| What you see | What it means |
 |---|---|
 | `-EPIPE` on transmit URBs, then `USB disconnect`, then re-enumeration with a new device number | Failing USB cable. Load-dependent, about 23 minutes to first failure |
 | `UP` and `ERROR-ACTIVE`, zero traffic, loopback fails | Wedged adapter. No software reset recovers this state, not even cutting power to the USB port; it needs a physical replug |
