@@ -437,9 +437,10 @@ The expected output is:
 rovercan          UP             <NOARP,UP,LOWER_UP,ECHO>
 ```
 
-The key word is `LOWER_UP` - that means the VESC on the other end of the wire is
-acknowledging frames. If you only see `UP` without `LOWER_UP`, the adapter is on but
-nothing is answering - check your VESC power and wiring.
+`UP` and `LOWER_UP` mean the interface is configured and the adapter's link layer is
+up. Neither one says anything about the VESCs - a CAN interface shows `LOWER_UP` with
+nothing else on the bus at all. To find out whether the VESCs are answering, watch the
+bus with `candump rovercan` as in Step 10, or run `sudo can-selftest`.
 
 ---
 
@@ -489,7 +490,7 @@ ip -br link show rovercan
 You should see `rovercan UP <NOARP,UP,LOWER_UP,ECHO>` without having to run anything
 manually.
 
-Optionally, sniff some CAN traffic to confirm the VESC is talking:
+Then confirm the VESCs are actually talking, which is the real test:
 
 ```bash
 sudo apt install can-utils  # only needed once, if not already installed
@@ -549,11 +550,14 @@ Common causes:
   link DOWN first. If you see it, make sure you actually pasted the **exact** script
   from Step 7.
 
-### `rovercan` shows `UP` but not `LOWER_UP`
+### `rovercan` is `UP` but `candump` shows nothing
 
-`UP` means the driver is active; `LOWER_UP` means something on the bus is answering.
-If you only see `UP`:
+`UP` and `LOWER_UP` describe the interface and the adapter's link layer only, not the
+bus, so they appear whether or not anything else is connected. If the interface is up
+but no frames arrive:
 
+- Run `sudo can-selftest`. It loops the adapter back to itself, which needs no bus
+  partner, so it tells you whether the adapter is wedged or the bus is simply quiet.
 - Check the VESC is powered on.
 - Check CAN-H and CAN-L are wired correctly and not swapped.
 - Check the 120-ohm termination resistor is in place at both ends of the CAN bus.

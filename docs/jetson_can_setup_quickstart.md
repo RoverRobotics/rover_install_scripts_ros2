@@ -121,7 +121,7 @@ Then:
 sudo systemctl daemon-reload
 sudo systemctl enable --now can.service
 systemctl status can.service --no-pager
-ip -br link show rovercan    # expect UP,LOWER_UP,ECHO
+ip -br link show rovercan    # expect UP,LOWER_UP,ECHO (interface only, not the VESCs)
 ```
 
 `Type=oneshot` + `RemainAfterExit=true` is intentional - the script exits after
@@ -151,9 +151,10 @@ candump rovercan             # VESC telemetry streaming
 - **Kernel upgrade breaks the module.** `apt upgrade` of `nvidia-l4t-kernel` changes
   `uname -r`; your `.ko` no longer matches. Rebuild + reinstall as in steps 2-3.
   Prevent with `sudo apt-mark hold nvidia-l4t-kernel nvidia-l4t-kernel-headers`.
-- **No LOWER_UP** = driver's up but nothing on the bus is ACKing. Check VESC power,
-  wiring polarity, 120 ohm termination, and that the VESC is configured for 500k classic
-  CAN (not FD).
+- **`LOWER_UP` is not proof the VESCs are alive.** It only means the adapter's link
+  layer is up, and it appears with nothing else on the bus. The real test is
+  `candump rovercan`; no frames means check VESC power, wiring polarity, 120 ohm
+  termination, and that the VESC is configured for 500k classic CAN (not FD).
 - **Swapping adapters**: any `1d50:606f` device matches the rule - plug-and-play
   interchangeable. Different VID/PID? Edit the rule or add a second line.
 - **Different bitrate**: change `500000` in `/usr/sbin/enablecan`.
