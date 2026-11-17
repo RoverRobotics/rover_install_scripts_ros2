@@ -2416,14 +2416,87 @@ EOF8
     # the two apart.
     cat << EOF9 | sudo tee /usr/sbin/can-selftest
 #!/bin/bash
-# Is the USB-CAN adapter itself working, or is the bus just quiet?
+# Three stages: is the adapter alive, is anything on the bus, is the bitrate right?
 # Usage: sudo can-selftest
 IFACE=$CAN_IFACE
 BITRATE=$CAN_BITRATE
 VID=$CAN_VID
 PID=$CAN_PID
+LOG=/tmp/can-selftest-\$(date +%Y%m%d-%H%M%S).log
 
 if [ "\$(id -u)" -ne 0 ]; then echo "run me with sudo" >&2; exit 2; fi
+
+# Everything below is captured to \$LOG so it can be sent on as one file.
+dump_context() {
+  echo "##### robot"
+  echo "captured:  \$(date -Is)"
+  echo "log file:  \$LOG"
+  echo "host:      \$(hostname)"
+  echo "kernel:    \$(uname -r)"
+  echo "l4t:       \$(head -1 /etc/nv_tegra_release 2>/dev/null)"
+  echo "model:     \$(cat /proc/device-tree/model 2>/dev/null | tr -d '\\0')"
+  echo "uptime:    \$(uptime -p 2>/dev/null)"
+  # read the config from the running driver; guessing the wrong file misleads a diagnosis
+  CFG=\$(ps -eo args 2>/dev/null | grep -F 'roverrobotics_driver/roverrobotics_driver' | grep -v grep \
+         | sed -n 's/.*--params-file \\([^ ]*\\).*/\\1/p' | head -1)
+  if [ -n "\$CFG" ]; then
+    echo "config:    \$CFG (from the running driver)"
+    grep -nE 'robot_type|comm_type|device_port|serial_number' "\$CFG"
+  else
+    echo "config:    driver not running, so which config is loaded cannot be determined"
+  fi
+  echo
+  echo "##### gs_usb module"
+  modinfo gs_usb 2>&1 | head -4
+  MODPATH=\$(modinfo -n gs_usb 2>/dev/null)
+  if [ -n "\$MODPATH" ]; then
+    dpkg -S "\$MODPATH" 2>/dev/null || echo "owner:     no package owns it, so a kernel upgrade will remove it"
+  fi
+  echo
+  echo "##### usb and interface naming"
+  lsusb | grep -i "\$VID:\$PID" || echo "NO \$VID:\$PID ON USB"
+  echo "rovercan driver: \$(basename \$(readlink -f /sys/class/net/\$IFACE/device/driver 2>/dev/null) 2>/dev/null)"
+  for i in /sys/class/net/can* /sys/class/net/\$IFACE; do
+    [ -e "\$i" ] && echo "  \$(basename \$i) -> \$(basename \$(readlink -f \$i/device/driver 2>/dev/null) 2>/dev/null)"
+  done
+  echo
+  echo "##### link, sample 1"
+  ip -details -statistics link show "\$IFACE" 2>&1 | tee /tmp/.cs1
+  echo
+  echo "##### link, sample 2 (6 s later) - only a CHANGE here is a live fault"
+  sleep 6
+  ip -details -statistics link show "\$IFACE" 2>&1 | tee /tmp/.cs2
+  echo
+  echo "##### what moved between the two samples"
+  diff /tmp/.cs1 /tmp/.cs2 || true
+  rm -f /tmp/.cs1 /tmp/.cs2
+  echo
+  echo "##### 3 s of bus traffic, driver still running"
+  TALLY=\$(timeout 3 candump "\$IFACE" 2>/dev/null | awk '{print \$2}' | sort | uniq -c | sort -rn)
+  echo "\${TALLY:-no frames}"
+  echo
+  echo "##### services"
+  systemctl is-active roverrobotics.service can.service can-watchdog.timer 2>&1
+  systemctl show -p NRestarts roverrobotics.service can.service 2>&1
+  echo "can-watchdog interventions this boot: \$(journalctl -u can-watchdog -b --no-pager 2>/dev/null | grep -c restarting)"
+  echo "ENOBUFS this boot: \$(journalctl -b --no-pager 2>/dev/null | grep -c ENOBUFS)"
+  journalctl --list-boots 2>/dev/null | tail -5
+  echo
+  echo "##### dmesg, usb and can only"
+  dmesg -T 2>/dev/null | grep -iE 'gs_usb|mttcan|rovercan|usb disconnect|EPIPE|can[0-9]' | tail -30 || echo "none"
+  echo
+  echo "##### driver journal, this boot"
+  journalctl -u roverrobotics.service -b --no-pager 2>/dev/null | tail -30
+  echo
+  echo "##### can.service and can-watchdog journal, this boot"
+  journalctl -u can.service -u can-watchdog -b --no-pager 2>/dev/null | tail -25
+  echo
+}
+
+main() {
+
+# captured first, so the log is complete even if a check below bails out early
+dump_context
 
 if ! lsusb 2>/dev/null | grep -qi "\$VID:\$PID"; then
   echo "RESULT: no \$VID:\$PID adapter on the USB bus."
@@ -2442,15 +2515,22 @@ fi
 DRIVER_WAS=\$(systemctl is-active roverrobotics.service 2>/dev/null)
 restore() {
   ip link set "\$IFACE" down 2>/dev/null
-  ip link set "\$IFACE" type can bitrate "\$BITRATE" loopback off 2>/dev/null
+  # clear both test modes; leaving listen-only set would stop the robot driving
+  ip link set "\$IFACE" type can bitrate "\$BITRATE" loopback off listen-only off 2>/dev/null ||
+    ip link set "\$IFACE" type can bitrate "\$BITRATE" loopback off 2>/dev/null
   systemctl restart can.service >/dev/null 2>&1
   [ "\$DRIVER_WAS" = "active" ] && systemctl start roverrobotics.service >/dev/null 2>&1
+  if ip -details link show "\$IFACE" 2>/dev/null | grep -qiE "listen-only|loopback"; then
+    echo "WARNING: \$IFACE is still in listen-only or loopback mode; the robot will not drive." >&2
+    echo "         Run: sudo systemctl restart can.service" >&2
+  fi
 }
 trap restore EXIT
 
 [ "\$DRIVER_WAS" = "active" ] && systemctl stop roverrobotics.service >/dev/null 2>&1
 sleep 1
 
+echo "##### stage results"
 echo "Testing \$IFACE in loopback (no bus partner needed)..."
 ip link set "\$IFACE" down 2>/dev/null
 if ! ip link set "\$IFACE" type can bitrate "\$BITRATE" loopback on 2>/dev/null; then
@@ -2474,14 +2554,7 @@ GOT=\$(wc -l < "\$OUT" 2>/dev/null)
 rm -f "\$OUT"
 
 echo
-if [ "\${GOT:-0}" -gt 0 ]; then
-  echo "RESULT: ADAPTER IS HEALTHY (looped back \$GOT frame(s))."
-  echo "        So a silent bus is NOT the adapter. Check, in this order:"
-  echo "          1. the rover is powered on and the e-stop is released"
-  echo "          2. the CAN cable between the adapter and the rover"
-  echo "          3. 120 ohm termination at both ends of the bus"
-  exit 0
-else
+if [ "\${GOT:-0}" -le 0 ]; then
   echo "RESULT: ADAPTER IS WEDGED. It cannot even receive its own frames."
   echo "        This is the adapter, not the rover and not the wiring."
   echo "        Unplug the USB-CAN module and plug it back in, then:"
@@ -2493,6 +2566,93 @@ else
   echo "        Only a physical replug clears it."
   exit 1
 fi
+echo "STAGE 1: adapter is HEALTHY (looped back \$GOT frame(s))."
+echo
+
+# listen-only never transmits and never ACKs, so it cannot disturb a live bus
+echo "STAGE 2: listening for rover traffic at \$BITRATE (passive)..."
+ip link set "\$IFACE" down 2>/dev/null
+if ! ip link set "\$IFACE" type can bitrate "\$BITRATE" loopback off listen-only on 2>/dev/null; then
+  ip link set "\$IFACE" type can bitrate "\$BITRATE" loopback off 2>/dev/null
+  echo "         (listen-only unsupported here; listening in normal mode, which ACKs)"
+fi
+if ! ip link set "\$IFACE" up 2>/dev/null; then
+  echo "RESULT: \$IFACE would not come up for the bus check."
+  exit 1
+fi
+sleep 1
+
+BUS=\$(mktemp)
+timeout 2 candump -n 400 "\$IFACE" > "\$BUS" 2>/dev/null
+NF=\$(wc -l < "\$BUS" 2>/dev/null)
+
+if [ "\${NF:-0}" -gt 0 ]; then
+  SEEN=""; MISSING=""
+  for n in 1 2 3 4; do
+    if grep -qi "0000090\$n" "\$BUS"; then SEEN="\$SEEN \$n"; else MISSING="\$MISSING \$n"; fi
+  done
+  IDS=\$(awk '{print \$2}' "\$BUS" | sort -u | tr '\n' ' ')
+  rm -f "\$BUS"
+  echo "         \$NF frame(s) captured. IDs seen: \$IDS"
+  echo
+  if [ -z "\$MISSING" ]; then
+    echo "RESULT: CAN IS HEALTHY. Adapter, wiring, bitrate and all four VESCs are live."
+    echo "        Status 1 is arriving from VESC 1 2 3 4, so look past CAN:"
+    echo "          journalctl -u roverrobotics.service -b | tail -40"
+    echo "          systemctl show -p NRestarts roverrobotics.service"
+    exit 0
+  fi
+  echo "RESULT: BUS IS LIVE BUT VESC\$MISSING SILENT (status 1 seen from\$SEEN)."
+  echo "        Adapter and bitrate are fine, so check those controllers:"
+  echo "          power and CAN lead to each silent VESC"
+  echo "          its CAN ID in VESC Tool: 1=front-left 2=front-right 3=back-left 4=back-right"
+  echo "          status 1 enabled on it; the driver tracks freshness on status 1 only"
+  echo "        One loose lead mid-chain can silence the whole bus, so if several"
+  echo "        are missing suspect a connector before the controllers."
+  exit 1
+fi
+rm -f "\$BUS"
+echo "         nothing at \$BITRATE."
+echo
+
+echo "STAGE 3: sweeping bitrates (passive, listen-only)..."
+FOUND=""
+for B in 125000 250000 500000 800000 1000000; do
+  ip link set "\$IFACE" down 2>/dev/null
+  ip link set "\$IFACE" type can bitrate "\$B" listen-only on 2>/dev/null || continue
+  ip link set "\$IFACE" up 2>/dev/null || continue
+  C=\$(timeout 2 candump -n 50 "\$IFACE" 2>/dev/null | wc -l)
+  printf "         %-8s %s frame(s)\n" "\$B" "\$C"
+  [ "\${C:-0}" -gt 0 ] && FOUND="\$B"
+done
+echo
+if [ -n "\$FOUND" ] && [ "\$FOUND" != "\$BITRATE" ]; then
+  echo "RESULT: BITRATE MISMATCH. The rover is talking at \$FOUND, this box expects \$BITRATE."
+  echo "        Four VESCs agree on \$FOUND and this computer is the only node that"
+  echo "        does not, so suspect this box first: set BITRATE=\$FOUND in"
+  echo "        /usr/sbin/enablecan, then: sudo systemctl restart can.service"
+  echo "        Only change the VESCs if \$BITRATE is genuinely the intended value,"
+  echo "        in which case set all four in VESC Tool (classic CAN, not FD)."
+  exit 1
+fi
+echo "RESULT: ADAPTER IS FINE BUT NOTHING IS TRANSMITTING, at any common bitrate."
+echo "        Not the adapter and not the bitrate. Check, in this order:"
+echo "          1. rover powered on and e-stop released"
+echo "          2. CAN cable adapter-to-rover, seated at both ends"
+echo "          3. 120 ohm termination: power off, measure CAN-H to CAN-L."
+echo "             ~60 ohm = both terminators, ~120 = one, open = none or a broken lead"
+echo "          4. were the VESCs ever calibrated? an uncalibrated VESC never"
+echo "             puts a frame on the bus at all"
+exit 1
+}
+
+main 2>&1 | tee "\$LOG"
+RC=\${PIPESTATUS[0]}
+chmod 644 "\$LOG" 2>/dev/null
+echo
+echo "Full log, including the link counters and journals: \$LOG"
+echo "Send that one file; it carries no passwords or keys."
+exit \$RC
 EOF9
 
     sudo chmod +x /usr/sbin/can-selftest
@@ -3045,7 +3205,7 @@ if [ "$install_can" = true ]; then
 echo "  Check the CAN bus:"
 echo "      ip -details link show $CAN_IFACE      # expect UP and ERROR-ACTIVE"
 echo "      candump $CAN_IFACE                    # expect traffic from the VESCs"
-echo "      sudo can-selftest                  # if silent: adapter or rover?"
+echo "      sudo can-selftest                  # adapter, VESCs and bitrate, with a log"
 echo ""
 fi
 if [ "$install_realsense_opt" = true ]; then

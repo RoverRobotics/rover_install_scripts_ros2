@@ -499,7 +499,7 @@ which mode it settled on.
 | `/usr/sbin/enablecan` | Brings the CAN link up; resets the adapter only if the link is down, bus-off or silent | both |
 | `/etc/systemd/system/can.service` | Runs `enablecan` at boot | both |
 | `/usr/sbin/can-watchdog` + `.service` + `.timer` | Restarts `can.service` if the link drops or goes bus-off | `setup_rover.sh` |
-| `/usr/sbin/can-selftest` | Says whether a silent bus is the adapter or the rover | `setup_rover.sh` |
+| `/usr/sbin/can-selftest` | Three-stage CAN check: adapter loopback, which VESCs are on the bus, and bitrate; writes a log to `/tmp` | `setup_rover.sh` |
 | `/usr/local/sbin/reset_realsense_usb.sh` | Power-cycles the camera over USB before each start | `setup_rover.sh` (RealSense service) |
 | `/etc/sudoers.d/rover-realsense` | NOPASSWD for that one reset script | `setup_rover.sh` (RealSense service) |
 | `/etc/systemd/system/rover-realsense.service` | Starts the camera node at boot | `setup_rover.sh` (RealSense service) |
@@ -546,10 +546,13 @@ than guessing:
 sudo can-selftest
 ```
 
-It puts the adapter into loopback, where it transmits to itself and needs no
-rover, no VESCs and no wiring. If the frame comes back the adapter is fine and
-the problem is rover power, the cable or termination. If it does not, the
-adapter itself is wedged. The test restores normal mode when it finishes.
+Stage 1 puts the adapter into loopback, where it transmits to itself and needs
+no rover, no VESCs and no wiring, so a failure there is the adapter itself and
+nothing else. If it passes, stage 2 listens passively and names which of the
+four VESCs are broadcasting, and stage 3 sweeps the common bitrates if the bus
+is silent, which separates a bitrate mismatch from nothing being connected. The
+whole run is written to `/tmp/can-selftest-<timestamp>.log`, and normal mode is
+restored when it finishes, including if you interrupt it.
 
 **Driver.** Launch it by hand:
 
@@ -710,8 +713,8 @@ Only a physical replug cleared it. If your adapter behaves this way, either
 reflash its firmware (these boards expose a DFU interface) or use one that
 survives a reboot. The **InnoMaker USB2CAN V3.3** does.
 
-`sudo can-selftest` identifies the condition in about two seconds instead of
-sending you looking at cables.
+`sudo can-selftest` identifies the condition at stage 1 instead of sending you
+looking at cables.
 
 The same can happen to an adapter that is running: on a Jetson Orin Nano, a USB
 reset of a `1d50:606f` adapter that was up and receiving left it dead twice in a
