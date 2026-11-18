@@ -197,12 +197,27 @@ info "Checking the kernel build tree"
 # A custom-flashed kernel leaves this symlink pointing at the build host's
 # source tree, so test that it RESOLVES. `ls` happily lists a dangling link.
 if [[ ! -d "$KDIR" ]]; then
-  echo "  $KDIR -> $(readlink -f "$KDIR" 2>/dev/null || echo '(unresolvable)')"
-  fail "No usable kernel build tree.
-  If this is a stock L4T kernel:  sudo apt install nvidia-l4t-kernel-headers
-  If this kernel was custom-built and flashed, no headers package will ever
-  match its version string. Copy the build tree from the machine that built
-  it, or rebuild from public_sources on this device."
+  echo "  $KDIR -> $(readlink "$KDIR" 2>/dev/null || echo '(missing)')"
+  warn "The kernel build symlink does not resolve."
+  # A custom-flashed kernel leaves this pointing at the source tree on the
+  # machine that built it. The headers package is usually still installed, so
+  # look for a real KBUILD root before giving up.
+  FOUND_KBUILD=""
+  while IFS= read -r cand; do
+    [[ -f "$cand/Makefile" && -f "$cand/Module.symvers" ]] && { FOUND_KBUILD="$cand"; break; }
+  done < <(find /usr/src -maxdepth 5 -type d -name 'linux-*' 2>/dev/null | grep -F "$KVER" | sort)
+
+  if [[ -n "$FOUND_KBUILD" ]]; then
+    fail "Installed headers for this kernel were found, but $KDIR does not point at them.
+  Repoint it and run this script again:
+
+    sudo ln -sfn $FOUND_KBUILD \\
+                 $KDIR"
+  fi
+  fail "No usable kernel build tree, and no installed headers found for $KVER.
+  Install them with:  sudo apt install nvidia-l4t-kernel-headers
+  If this kernel was custom-built, copy the build tree from the machine that
+  built it, or rebuild from public_sources on this device."
 fi
 
 for f in Makefile Module.symvers scripts/Makefile.build; do
