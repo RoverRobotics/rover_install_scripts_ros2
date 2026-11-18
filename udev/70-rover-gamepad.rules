@@ -1,0 +1,19 @@
+# Gamepad rules that depend on ID_INPUT_JOYSTICK.
+# This file must sort AFTER 60-input-id.rules: that is where udev runs the
+# input_id builtin that sets ID_INPUT_JOYSTICK. The same rule in
+# 55-roverrobotics.rules never matched, because at 55 the property does not
+# exist yet and the device silently keeps the default root:input 0660.
+# Install this udev with
+# sudo cp 70-rover-gamepad.rules /etc/udev/rules.d/70-rover-gamepad.rules && sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# Any gamepad the kernel calls a joystick (Xbox and friends) has no
+# programmable light, so it only gets rumble, through evdev force feedback.
+# Without this the event node is root:input and the rover user cannot open it,
+# so joy_linux logs "Couldn't open joystick force feedback: Bad file descriptor".
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_JOYSTICK}=="1", GROUP="plugdev", MODE="0660"
+
+# Stable names for a Sony pad (054c): PS5 DualSense and PS4 DualShock 4.
+# The kernel's jsN/eventN numbering is not stable across reconnects, so point
+# joy_linux at these with dev and dev_ff instead of a bare /dev/input/js0.
+SUBSYSTEM=="input", KERNEL=="js[0-9]*",    ATTRS{id/vendor}=="054c", ENV{ID_INPUT_JOYSTICK}=="1", GROUP="plugdev", MODE="0660", SYMLINK+="rover-pad"
+SUBSYSTEM=="input", KERNEL=="event[0-9]*", ATTRS{id/vendor}=="054c", ENV{ID_INPUT_JOYSTICK}=="1", GROUP="plugdev", MODE="0660", SYMLINK+="rover-pad-ff"

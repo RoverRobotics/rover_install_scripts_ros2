@@ -3119,10 +3119,15 @@ if [ "$install_udev" = true ]; then
         print_red "Could not add $USER to plugdev: the controller light bar and rumble will not work"
     fi
 
-    print_italic "Copying Udev rules into /etc/udev/rules.d/55-roverrobotics.rules"
-    sudo cp "$BASEDIR/udev/55-roverrobotics.rules" /etc/udev/rules.d/55-roverrobotics.rules
-    if [ $? -ne 0 ]; then
-        print_red "Failed to copy Udev rules into /etc/udev/rules.d/55-roverrobotics.rules"
+    print_italic "Copying Udev rules into /etc/udev/rules.d/"
+    udev_copy_ok=true
+    # two files: the joystick rule needs ID_INPUT_JOYSTICK, which udev only sets
+    # at 60-input-id.rules, so it cannot live in the 55- file
+    for udev_rule in 55-roverrobotics.rules 70-rover-gamepad.rules; do
+        sudo cp "$BASEDIR/udev/$udev_rule" "/etc/udev/rules.d/$udev_rule" || udev_copy_ok=false
+    done
+    if [ "$udev_copy_ok" != true ]; then
+        print_red "Failed to copy Udev rules into /etc/udev/rules.d/"
     else
         print_green "Successfully copied udev rules"
 

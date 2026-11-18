@@ -162,7 +162,7 @@ remove_files /usr/sbin/roverrobotics /usr/sbin/enablecan /usr/sbin/can-watchdog 
 
 # --- udev rules -------------------------------------------------------------
 reload_udev=false
-for rule in 55-roverrobotics.rules 56-rover-ublox.rules 99-can-usb.rules; do
+for rule in 55-roverrobotics.rules 70-rover-gamepad.rules 56-rover-ublox.rules 99-can-usb.rules; do
     if [ -f "/etc/udev/rules.d/$rule" ]; then
         remove_files "/etc/udev/rules.d/$rule"; reload_udev=true
     fi
