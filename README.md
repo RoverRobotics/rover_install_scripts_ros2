@@ -89,9 +89,14 @@ rover looks dead on the bus.
 ```
 
 This builds `gs_usb` against the running kernel, installs the udev rule, and
-sets up `can.service`. See
-[Nvidia_Kernel_Mod_for_jetpack_6plus.pdf](docs/Nvidia_Kernel_Mod%20_for_jetpack_6plus.pdf)
-for the background.
+sets up `can.service`. For a PS4/PS5 controller, `./setup_jetson_gamepad.sh` does
+the same for the pad driver. Neither needs a reflash.
+
+If you are building a base image from scratch and want the drivers inside the
+kernel itself, see
+[kernel_customization_jetpack6.md](docs/kernel_customization_jetpack6.md) or
+[kernel_customization_jetpack7.md](docs/kernel_customization_jetpack7.md).
+On a robot that is already running, use the scripts above instead.
 
 If you skip this step on a Jetson, `setup_rover.sh` will detect the missing
 module and tell you.
